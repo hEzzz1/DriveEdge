@@ -1,0 +1,18 @@
+<resources>
+  <string name="app_name">DriveEdge</string>
+
+  <string name="notification_channel_name">DriveEdge Camera</string>
+  <string name="notification_title">DriveEdge 正在采集</string>
+  <string name="notification_text">前台服务正在采集相机并回调帧数据</string>
+
+  <string name="start_capture">启动采集</string>
+  <string name="stop_capture">停止采集</string>
+
+  <string name="status_idle">状态：未启动</string>
+  <string name="status_connected">状态：服务已连接，等待帧回调</string>
+  <string name="status_running">状态：采集中 %1$dx%2$d 旋转=%3$d FPS=%4$d ts=%5$d</string>
+  <string name="status_disconnected">状态：服务断开</string>
+  <string name="status_stopped">状态：已停止</string>
+
+  <string name="permissions_denied">相机/通知权限未授权，无法启动采集</string>
+</resources>

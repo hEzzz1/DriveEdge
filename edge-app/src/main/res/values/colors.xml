@@ -1,0 +1,5 @@
+<resources>
+  <color name="driveedge_primary">#0D3B66</color>
+  <color name="driveedge_on_primary">#FFFFFF</color>
+  <color name="driveedge_surface">#F8F9FA</color>
+</resources>

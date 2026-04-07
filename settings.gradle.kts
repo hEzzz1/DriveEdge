@@ -1,3 +1,12 @@
+pluginManagement {
+  repositories {
+    google()
+    mavenCentral()
+    gradlePluginPortal()
+  }
+}
+
 rootProject.name = "DriveEdge"
 
 include(":edge-core")
+include(":edge-app")
