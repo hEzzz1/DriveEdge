@@ -11,3 +11,4 @@ rootProject.name = "DriveEdge"
 include(":edge-core")
 include(":edge-app")
 include(":module-infer-yolo")
+include(":module-temporal-engine")
