@@ -9,6 +9,7 @@
 - [module-temporal-engine 功能文档](docs/module-temporal-engine-feature.md)
 - [module-risk-engine 功能文档](docs/module-risk-engine-feature.md)
 - [module-alert 功能文档](docs/module-alert-feature.md)
+- [module-storage 功能文档](docs/module-storage-feature.md)
 
 ## IDEA 开发
 1. 用 IntelliJ IDEA 打开仓库根目录 `/Users/m1ngyangg/Documents/DriveEdge`。
