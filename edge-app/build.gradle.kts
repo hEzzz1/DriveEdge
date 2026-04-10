@@ -6,6 +6,10 @@ android {
   namespace = "com.driveedge.app"
   compileSdk = 34
 
+  buildFeatures {
+    buildConfig = true
+  }
+
   defaultConfig {
     applicationId = "com.driveedge.app"
     minSdk = 26
@@ -14,6 +18,19 @@ android {
     versionName = "0.1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    buildConfigField("String", "DRIVESERVER_DEVICE_TOKEN", "\"dev-device-token\"")
+  }
+
+  flavorDimensions += "endpoint"
+  productFlavors {
+    create("simulator") {
+      dimension = "endpoint"
+      buildConfigField("String", "DRIVESERVER_BASE_URL", "\"http://10.0.2.2:8080\"")
+    }
+    create("hostlocal") {
+      dimension = "endpoint"
+      buildConfigField("String", "DRIVESERVER_BASE_URL", "\"http://127.0.0.1:8080\"")
+    }
   }
 
   buildTypes {
@@ -34,6 +51,10 @@ android {
 }
 
 dependencies {
+  implementation(project(":module-uploader"))
+  implementation(project(":module-event-center"))
+  implementation(project(":module-risk-engine"))
+
   implementation("androidx.core:core:1.13.1")
   implementation("androidx.appcompat:appcompat:1.7.0")
   implementation("com.google.android.material:material:1.12.0")

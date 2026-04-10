@@ -15,6 +15,21 @@
     android:text="@string/status_idle"
     android:textAppearance="@style/TextAppearance.Material3.BodyMedium" />
 
+  <TextView
+    android:id="@+id/networkStatusView"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingBottom="8dp"
+    android:text="@string/network_status_idle"
+    android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+  <Button
+    android:id="@+id/checkNetworkButton"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="12dp"
+    android:text="@string/check_network_status" />
+
   <androidx.camera.view.PreviewView
     android:id="@+id/previewView"
     android:layout_width="match_parent"

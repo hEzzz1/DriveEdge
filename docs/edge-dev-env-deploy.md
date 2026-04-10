@@ -23,8 +23,10 @@
 3. Android Build-Tools 34.0.0
 4. Android Platform-Tools
 5. Android Command-line Tools（latest）
-6. Android NDK（26.x）
-7. CMake（3.22.1）
+6. Android Emulator
+7. Android System Image（推荐：`system-images;android-34;google_apis;arm64-v8a`）
+8. Android NDK（26.x）
+9. CMake（3.22.1）
 
 ### 2.3 推荐目录
 在仓库根目录建议保持以下结构：
@@ -54,17 +56,34 @@ export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin
 
 Linux 用户仅需把 `ANDROID_HOME` 改成你的 SDK 实际路径（例如 `$HOME/Android/Sdk`）。
 
+如果你通过 Homebrew 安装了 Android command-line tools，也可使用：
+```bash
+export ANDROID_HOME="/opt/homebrew/share/android-commandlinetools"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+```
+
 ## 4. 安装 Android SDK 组件（命令行方式）
 如果你更习惯命令行安装，可执行：
 
 ```bash
 yes | sdkmanager --licenses
 sdkmanager \
+  "emulator" \
   "platform-tools" \
   "platforms;android-34" \
+  "system-images;android-34;google_apis;arm64-v8a" \
   "build-tools;34.0.0" \
   "ndk;26.1.10909125" \
   "cmake;3.22.1"
+```
+
+创建模拟器（示例）：
+```bash
+echo "no" | avdmanager create avd \
+  -n DriveEdge_API34 \
+  -k "system-images;android-34;google_apis;arm64-v8a" \
+  -d "pixel_7" \
+  -f
 ```
 
 ## 5. YOLO 开发依赖（本地 Python）
@@ -94,6 +113,7 @@ adb logcat | rg -i "DriveEdge|YOLO|Upload|traceId"
    - 请求头 `X-Device-Token`
    - 幂等键 `eventId`
    - 响应字段 `code/message/data/traceId`
+5. Android 模拟器访问宿主机服务时使用 `http://10.0.2.2:8080`（不要使用模拟器内的 `127.0.0.1`）。
 
 ## 7. 一键自检
 仓库内提供脚本：

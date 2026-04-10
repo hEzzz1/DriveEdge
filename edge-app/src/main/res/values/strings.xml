@@ -9,10 +9,17 @@
   <string name="stop_capture">停止采集</string>
 
   <string name="status_idle">状态：未启动</string>
+  <string name="status_idle_with_uploader">状态：未启动 | 上传地址=%1$s</string>
   <string name="status_connected">状态：服务已连接，等待帧回调</string>
   <string name="status_running">状态：采集中 %1$dx%2$d 旋转=%3$d FPS=%4$d ts=%5$d</string>
   <string name="status_disconnected">状态：服务断开</string>
   <string name="status_stopped">状态：已停止</string>
 
   <string name="permissions_denied">相机/通知权限未授权，无法启动采集</string>
+  <string name="check_network_status">检测网络通信</string>
+  <string name="network_status_idle">网络：未检测</string>
+  <string name="network_status_checking">网络：检测中…</string>
+  <string name="network_status_failed">网络：请求失败 | %1$s</string>
+  <string name="network_status_result">网络：HTTP=%1$d code=%2$s traceId=%3$s 耗时=%4$dms</string>
+  <string name="network_status_target">目标：%1$s</string>
 </resources>

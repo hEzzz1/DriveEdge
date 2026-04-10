@@ -3,19 +3,21 @@
 ## 1. 文档信息
 - 项目：DriveEdge
 - 模块：`edge-app`
-- 版本：v0.1.0（当前仓库实现）
-- 日期：2026-04-08
+- 版本：v0.2.0（当前仓库实现）
+- 日期：2026-04-10
 
 ## 2. 目标与范围
 本文档说明当前仓库已经打通的 Android 端本地链路：
 1. `ForegroundService` 常驻运行。
 2. `CameraX Preview` 预览显示。
 3. `ImageAnalysis` 每帧回调到业务层。
+4. `module-uploader` 真实上报探测（`POST /api/v1/events` + `X-Device-Token`）。
+5. UI 展示网络通信状态（`HTTP/code/traceId/耗时`）。
 
 当前不包含：
-1. 与服务端 API 的网络交互。
-2. Room 事件队列与 WorkManager 上传重试。
-3. YOLO 推理与时序引擎。
+1. Room 事件队列与 WorkManager 上传重试。
+2. YOLO 推理与时序引擎。
+3. DeviceToken 的 Keystore 安全存储。
 
 ## 3. 总体架构
 ```mermaid
@@ -27,6 +29,10 @@ flowchart LR
     svc[CameraForegroundService] --> cam[CameraX: Preview + ImageAnalysis]
     cam --> cb[FrameListener.onFrame]
     cb --> uiStatus[UI 状态刷新: 分辨率/FPS/timestamp]
+    ui --> probe[点击 检测网络通信]
+    probe --> uploader[module-uploader EventUploader]
+    uploader --> server[DriveServer POST /api/v1/events]
+    server --> uiNet[UI 展示 HTTP/code/traceId]
 ```
 
 ## 4. 关键实现说明
@@ -55,9 +61,22 @@ flowchart LR
 2. 启动并绑定前台服务。
 3. 把 `PreviewView.getSurfaceProvider()` 交给服务侧 `attachPreview()`。
 4. 注册 `FrameListener` 接收每帧数据并更新 UI 状态（每秒刷新一次 FPS 与帧信息）。
-5. 停止时解除回调、解绑服务并发送 STOP action。
+5. 点击“检测网络通信”时调用 `EventUploader.upload()`。
+6. 将网络探测结果显示到界面（`HTTP/code/traceId/耗时`）。
+7. 停止时解除回调、解绑服务并发送 STOP action。
 
-### 4.3 帧数据结构：`FrameData`
+### 4.3 上传探测链路：`module-uploader`
+文件：
+1. `module-uploader/src/main/kotlin/com/driveedge/uploader/EventUploader.kt`
+2. `module-uploader/src/main/kotlin/com/driveedge/uploader/EventsApiTransport.kt`
+
+说明：
+1. 统一使用 `POST /api/v1/events`。
+2. 自动注入请求头 `X-Device-Token`。
+3. 解析服务端统一响应 `code/message/traceId` 并返回 `UploadReceipt`。
+4. 默认传输层为 `HttpURLConnection`，可同时在 JVM/Android 环境使用。
+
+### 4.4 帧数据结构：`FrameData`
 文件：`edge-app/src/main/java/com/driveedge/app/camera/FrameData.java`
 
 字段：
@@ -66,15 +85,17 @@ flowchart LR
 3. `timestampNs`
 4. `nv21`（字节数组）
 
-### 4.4 清单与权限
+### 4.5 清单与权限
 文件：`edge-app/src/main/AndroidManifest.xml`
 
 已声明：
 1. `android.permission.CAMERA`
-2. `android.permission.FOREGROUND_SERVICE`
-3. `android.permission.FOREGROUND_SERVICE_CAMERA`
-4. `android.permission.POST_NOTIFICATIONS`
-5. `service` 的 `android:foregroundServiceType="camera"`
+2. `android.permission.INTERNET`
+3. `android.permission.FOREGROUND_SERVICE`
+4. `android.permission.FOREGROUND_SERVICE_CAMERA`
+5. `android.permission.POST_NOTIFICATIONS`
+6. `service` 的 `android:foregroundServiceType="camera"`
+7. `application` 启用 `android:usesCleartextTraffic="true"`（便于本地 `http://` 联调）
 
 ## 5. 构建与本地联调
 
@@ -90,22 +111,31 @@ android.useAndroidX=true
 ```
 
 ### 5.2 构建命令
-在仓库根目录执行：
+在仓库根目录执行（模拟器联调）：
 ```bash
-./gradlew :edge-app:assembleDebug -x lint
+./gradlew :edge-app:assembleSimulatorDebug
 ```
 
 成功产物：
-- `edge-app/build/outputs/apk/debug/edge-app-debug.apk`
+- `edge-app/build/outputs/apk/simulator/debug/edge-app-simulator-debug.apk`
 
-### 5.3 真机联调步骤（推荐）
+`Build Variant` 说明：
+1. `simulatorDebug`：`baseUrl = http://10.0.2.2:8080`（Android 模拟器访问宿主机）。
+2. `hostlocalDebug`：`baseUrl = http://127.0.0.1:8080`（本机 JVM 侧调试）。
+
+### 5.3 模拟器联调步骤（推荐）
 1. `adb devices` 确认设备在线。
-2. `./gradlew :edge-app:installDebug` 安装应用。
+2. 选择 `simulatorDebug` 变体并安装应用：
+```bash
+./gradlew :edge-app:installSimulatorDebug
+```
 3. 启动应用后点击“启动采集”。
+4. 点击“检测网络通信”。
 4. 预期结果：
    - 预览画面显示。
    - 状态文案每秒刷新，出现 `FPS` 和 `ts`。
    - 前台通知常驻显示采集中。
+   - 网络状态区显示 `HTTP/code/traceId/耗时`。
 
 常用检查命令：
 ```bash
@@ -120,11 +150,11 @@ adb shell dumpsys activity services | rg CameraForegroundService
 4. 应用切后台后服务仍保持前台通知与采集能力。
 
 ## 7. 已知限制
-1. 尚未接入网络上报接口（`POST /api/v1/events`）。
-2. 尚未接入事件缓存、离线重试与幂等处理。
+1. 当前上报为“探测模式”，未接入本地事件队列与补传状态机。
+2. 尚未接入事件缓存、离线重试与幂等回写。
 3. 尚未集成推理模型与行为时序判定。
 
 ## 8. 下一阶段建议
 1. 增加检测结果数据结构与回调总线（Frame -> Inference）。
-2. 接入 Retrofit + `X-Device-Token` 鉴权上报。
+2. 将 `module-storage` 与 `module-uploader` 串联成真实上传闭环。
 3. 增加 Room + WorkManager 事件状态机（`PENDING/SENDING/SUCCESS/RETRY_WAIT/FAILED_FINAL`）。
