@@ -4,38 +4,30 @@
   android:layout_width="match_parent"
   android:layout_height="match_parent"
   android:orientation="vertical"
-  android:padding="16dp"
+  android:padding="12dp"
   tools:context=".ui.MainActivity">
 
   <TextView
     android:id="@+id/statusView"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:paddingBottom="12dp"
+    android:layout_marginBottom="8dp"
     android:text="@string/status_idle"
     android:textAppearance="@style/TextAppearance.Material3.BodyMedium" />
 
   <TextView
-    android:id="@+id/networkStatusView"
+    android:id="@+id/fatigueStatusView"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:paddingBottom="8dp"
-    android:text="@string/network_status_idle"
+    android:layout_marginBottom="8dp"
+    android:text="@string/status_local_boot"
     android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
 
-  <Button
-    android:id="@+id/checkNetworkButton"
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:layout_marginBottom="12dp"
-    android:text="@string/check_network_status" />
-
-  <androidx.camera.view.PreviewView
+  <TextureView
     android:id="@+id/previewView"
     android:layout_width="match_parent"
     android:layout_height="0dp"
-    android:layout_weight="1"
-    android:background="#111111" />
+    android:layout_weight="1" />
 
   <LinearLayout
     android:layout_width="match_parent"
@@ -61,5 +53,37 @@
       android:layout_weight="1"
       android:text="@string/stop_capture" />
   </LinearLayout>
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="8dp"
+    android:orientation="horizontal">
+
+    <Button
+      android:id="@+id/recordButton"
+      android:layout_width="0dp"
+      android:layout_height="wrap_content"
+      android:layout_weight="1"
+      android:text="@string/record_start" />
+
+    <Space
+      android:layout_width="12dp"
+      android:layout_height="1dp" />
+
+    <Button
+      android:id="@+id/openRecordingsButton"
+      android:layout_width="0dp"
+      android:layout_height="wrap_content"
+      android:layout_weight="1"
+      android:text="@string/open_recordings_dir" />
+  </LinearLayout>
+
+  <Button
+    android:id="@+id/openQualityReplayButton"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="8dp"
+    android:text="@string/open_quality_replay_dir" />
 
 </LinearLayout>

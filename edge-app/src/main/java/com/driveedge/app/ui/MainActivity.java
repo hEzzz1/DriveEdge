@@ -1,15 +1,47 @@
 package com.driveedge.app.ui;
 
 import android.Manifest;
-import android.content.ComponentName;
+import android.annotation.SuppressLint;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
-import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.ImageFormat;
+import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.Rect;
+import android.graphics.SurfaceTexture;
+import android.graphics.YuvImage;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraCaptureSession;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.camera2.params.StreamConfigurationMap;
+import android.media.Image;
+import android.media.ImageReader;
+import android.media.MediaRecorder;
+import android.media.AudioManager;
+import android.media.ToneGenerator;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.IBinder;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.SystemClock;
+import android.provider.DocumentsContract;
+import android.util.Log;
+import android.util.Range;
+import android.util.Size;
+import android.view.Surface;
+import android.view.TextureView;
 import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -19,133 +51,970 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.camera.view.PreviewView;
 import androidx.core.content.ContextCompat;
 
-import com.driveedge.app.BuildConfig;
 import com.driveedge.app.R;
-import com.driveedge.app.camera.CameraForegroundService;
 import com.driveedge.app.camera.FrameData;
-import com.driveedge.event.center.EdgeEvent;
-import com.driveedge.event.center.UploadStatus;
-import com.driveedge.risk.engine.RiskLevel;
-import com.driveedge.uploader.EventUploader;
-import com.driveedge.uploader.HttpEventsApiTransport;
-import com.driveedge.uploader.UploadReceipt;
-import com.driveedge.uploader.UploaderConfig;
+import com.driveedge.app.fatigue.LocalFatigueAnalyzer;
+import com.driveedge.app.fatigue.LocalOnnxDetector;
 
-import java.time.Duration;
-import java.time.Instant;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Arrays;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class MainActivity extends AppCompatActivity {
-  private static final Duration NETWORK_CONNECT_TIMEOUT = Duration.ofSeconds(3);
-  private static final Duration NETWORK_REQUEST_TIMEOUT = Duration.ofSeconds(4);
+public final class MainActivity extends AppCompatActivity {
+  private static final String TAG = "DriveEdgeMain";
+  private static final long PREVIEW_UPLOAD_TICK_MS = 200L;
+  private static final long WAITING_STATUS_INTERVAL_MS = 1000L;
+  private static final int ANALYSIS_TARGET_WIDTH = 1920;
+  private static final int ANALYSIS_TARGET_HEIGHT = 1080;
+  private static final int AE_AWB_STABLE_FRAME_COUNT = 8;
+  private static final long REPLAY_DUMP_INTERVAL_MS = 1000L;
+  private static final long PROBE_DUMP_INTERVAL_MS = 1000L;
+  private static final int REPLAY_JPEG_QUALITY = 92;
+  private static final int DEFAULT_RECORD_WIDTH = 1280;
+  private static final int DEFAULT_RECORD_HEIGHT = 720;
+  private static final String LOCAL_MODEL_ASSET_PATH = "models/yolov8face.onnx";
+  private static final String LOCAL_FATIGUE_MODEL_ASSET_PATH = "models/face_landmarker.task";
+  private static final float LOCAL_CONF_THRESHOLD = 0.25f;
+  private static final float LOCAL_NMS_THRESHOLD = 0.45f;
+  private static final byte[] EMPTY_FRAME_BYTES = new byte[0];
+  private static final String[] LOCAL_CLASS_NAMES = {"face"};
 
-  private PreviewView previewView;
+  private TextureView previewView;
   private TextView statusView;
-  private TextView networkStatusView;
+  private TextView fatigueStatusView;
   private Button startButton;
   private Button stopButton;
-  private Button checkNetworkButton;
-  private final ExecutorService networkExecutor = Executors.newSingleThreadExecutor();
+  private Button recordButton;
+  private Button openRecordingsButton;
+  private Button openQualityReplayButton;
 
   @Nullable
-  private CameraForegroundService captureService;
+  private CameraManager cameraManager;
+  @Nullable
+  private String openedCameraId;
+  private int frontCameraSensorOrientation = 0;
+  private int frontCameraLensFacing = CameraCharacteristics.LENS_FACING_FRONT;
+  private int recordWidth = DEFAULT_RECORD_WIDTH;
+  private int recordHeight = DEFAULT_RECORD_HEIGHT;
+  private int previewWidth = DEFAULT_RECORD_WIDTH;
+  private int previewHeight = DEFAULT_RECORD_HEIGHT;
+  private int analysisWidth = ANALYSIS_TARGET_WIDTH;
+  private int analysisHeight = ANALYSIS_TARGET_HEIGHT;
+  private int noiseReductionMode = CaptureRequest.NOISE_REDUCTION_MODE_FAST;
+  private int edgeMode = CaptureRequest.EDGE_MODE_FAST;
+  private int toneMapMode = CaptureRequest.TONEMAP_MODE_FAST;
+  private boolean aeLockAvailable = false;
+  private boolean awbLockAvailable = false;
+  private boolean aeAwbLocked = false;
+  private int aeAwbStableFrames = 0;
+  @Nullable
+  private CaptureRequest.Builder previewRequestBuilder;
 
-  private boolean isBound;
-  private volatile boolean networkCheckRunning = false;
+  @Nullable
+  private HandlerThread cameraThread;
+  @Nullable
+  private Handler cameraHandler;
+  @Nullable
+  private CameraDevice cameraDevice;
+  @Nullable
+  private CameraCaptureSession captureSession;
+  @Nullable
+  private ImageReader imageReader;
+
+  @Nullable
+  private MediaRecorder mediaRecorder;
+  @Nullable
+  private Surface recorderSurface;
+  @Nullable
+  private File recordingFile;
+  private boolean isRecording = false;
+
+  private final ExecutorService inferExecutor = Executors.newSingleThreadExecutor();
+  private final AtomicBoolean inferTaskRunning = new AtomicBoolean(false);
   private final AtomicInteger secondFrameCounter = new AtomicInteger(0);
+  private final AtomicInteger secondInferenceCounter = new AtomicInteger(0);
+
+  @Nullable
+  private LocalOnnxDetector localOnnxDetector;
+  @Nullable
+  private LocalFatigueAnalyzer localFatigueAnalyzer;
+  @NonNull
+  private final Object localOnnxDetectorLock = new Object();
+  @NonNull
+  private final Object localFatigueAnalyzerLock = new Object();
+
+  private boolean captureStarted = false;
+  private boolean previewUploadLoopRunning = false;
   private long lastStatusUpdateMs = 0L;
+  private long lastInferStatusUpdateMs = 0L;
+  private long lastReplayDumpMs = 0L;
+  private long lastProbeDumpMs = 0L;
+  private long lastWaitingStatusMs = 0L;
+  private long lastFatigueWarningToastMs = 0L;
+  @Nullable
+  private ToneGenerator fatigueToneGenerator;
+  @NonNull
+  private String inferSessionId = "session-init";
+  @NonNull
+  private final Object latestYuvFrameLock = new Object();
+  @Nullable
+  private YuvFrame latestYuvFrame;
 
-  private final CameraForegroundService.FrameListener frameListener = this::onFrame;
-
-  private final ServiceConnection serviceConnection = new ServiceConnection() {
-    @Override
-    public void onServiceConnected(ComponentName name, IBinder service) {
-      if (!(service instanceof CameraForegroundService.LocalBinder)) {
-        return;
-      }
-
-      CameraForegroundService.LocalBinder binder = (CameraForegroundService.LocalBinder) service;
-      captureService = binder.getService();
-      isBound = true;
-
-      captureService.attachPreview(previewView.getSurfaceProvider());
-      captureService.setFrameListener(frameListener);
-
-      statusView.setText(getString(R.string.status_connected));
-      startButton.setEnabled(false);
-      stopButton.setEnabled(true);
-    }
-
-    @Override
-    public void onServiceDisconnected(ComponentName name) {
-      captureService = null;
-      isBound = false;
-      startButton.setEnabled(true);
-      stopButton.setEnabled(false);
-      statusView.setText(getString(R.string.status_disconnected));
-    }
-  };
-
-  private final ActivityResultLauncher<String[]> permissionLauncher =
-    registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), result -> {
-      boolean allGranted = areAllPermissionsGranted(result);
-      if (!allGranted) {
+  private final ActivityResultLauncher<String> cameraPermissionLauncher =
+    registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+      if (!granted) {
         Toast.makeText(this, R.string.permissions_denied, Toast.LENGTH_SHORT).show();
         return;
       }
-      startCaptureAndBindService();
+      startCaptureInternal();
     });
 
+  private final TextureView.SurfaceTextureListener surfaceTextureListener = new TextureView.SurfaceTextureListener() {
+    @Override
+    public void onSurfaceTextureAvailable(@NonNull SurfaceTexture surface, int width, int height) {
+      if (captureStarted) {
+        openCameraIfReady();
+      }
+    }
+
+    @Override
+    public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture surface, int width, int height) {
+      // no-op
+    }
+
+    @Override
+    public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surface) {
+      closeCameraResources();
+      return true;
+    }
+
+    @Override
+    public void onSurfaceTextureUpdated(@NonNull SurfaceTexture surface) {
+      // no-op
+    }
+  };
+
+  private final CameraCaptureSession.CaptureCallback previewCaptureCallback = new CameraCaptureSession.CaptureCallback() {
+    @Override
+    public void onCaptureCompleted(
+      @NonNull CameraCaptureSession session,
+      @NonNull CaptureRequest request,
+      @NonNull TotalCaptureResult result
+    ) {
+      maybeLockAeAwb(session, result);
+    }
+  };
+
+  private final Runnable previewUploadRunnable = this::uploadPreviewFrameTick;
+
   @Override
-  protected void onCreate(Bundle savedInstanceState) {
+  protected void onCreate(@Nullable Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
     setContentView(R.layout.activity_main);
 
     previewView = findViewById(R.id.previewView);
     statusView = findViewById(R.id.statusView);
-    networkStatusView = findViewById(R.id.networkStatusView);
+    fatigueStatusView = findViewById(R.id.fatigueStatusView);
     startButton = findViewById(R.id.startButton);
     stopButton = findViewById(R.id.stopButton);
-    checkNetworkButton = findViewById(R.id.checkNetworkButton);
+    recordButton = findViewById(R.id.recordButton);
+    openRecordingsButton = findViewById(R.id.openRecordingsButton);
+    openQualityReplayButton = findViewById(R.id.openQualityReplayButton);
 
-    startButton.setOnClickListener(view -> ensurePermissionsThenStart());
-    stopButton.setOnClickListener(view -> stopCaptureService());
-    checkNetworkButton.setOnClickListener(view -> probeNetworkStatus());
+    cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
 
-    statusView.setText(getString(R.string.status_idle_with_uploader, BuildConfig.DRIVESERVER_BASE_URL));
-    networkStatusView.setText(String.format(
-      Locale.getDefault(),
-      "%s\n%s",
-      getString(R.string.network_status_target, eventsEndpointUrl()),
-      getString(R.string.network_status_idle)
-    ));
+    previewView.setSurfaceTextureListener(surfaceTextureListener);
+    startButton.setOnClickListener(v -> ensurePermissionThenStart());
+    stopButton.setOnClickListener(v -> stopCapture());
+    recordButton.setOnClickListener(v -> toggleRecording());
+    openRecordingsButton.setOnClickListener(v -> openRecordingsDirectory());
+    openQualityReplayButton.setOnClickListener(v -> openQualityReplayDirectory());
+
     stopButton.setEnabled(false);
-    probeNetworkStatus();
+    recordButton.setEnabled(false);
+    updateRecordButton();
+    resetInferSession();
+    statusView.setText(getString(R.string.status_idle));
   }
 
   @Override
   protected void onDestroy() {
-    if (isBound) {
-      captureService.setFrameListener(null);
-      captureService.detachPreview();
-      unbindService(serviceConnection);
-      isBound = false;
-    }
-    networkExecutor.shutdownNow();
+    stopCapture();
+    releaseLocalDetector();
+    releaseLocalFatigueAnalyzer();
+    releaseFatigueToneGenerator();
+    inferExecutor.shutdownNow();
     super.onDestroy();
   }
 
-  private void onFrame(@NonNull FrameData frame) {
+  private void ensurePermissionThenStart() {
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+      startCaptureInternal();
+      return;
+    }
+    cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
+  }
+
+  private void startCaptureInternal() {
+    if (captureStarted) {
+      return;
+    }
+    captureStarted = true;
+    resetInferSession();
+    statusView.setText(getString(R.string.status_connected));
+    startButton.setEnabled(false);
+    stopButton.setEnabled(true);
+    recordButton.setEnabled(true);
+    updateRecordButton();
+    startCameraThreadIfNeeded();
+    startPreviewUploadLoop();
+    if (previewView.isAvailable()) {
+      openCameraIfReady();
+    }
+  }
+
+  private void stopCapture() {
+    if (!captureStarted) {
+      return;
+    }
+    captureStarted = false;
+    stopRecordingInternal(false);
+    closeCameraResources();
+    stopCameraThreadIfNeeded();
+    stopPreviewUploadLoop();
+    secondFrameCounter.set(0);
+    secondInferenceCounter.set(0);
+    statusView.setText(getString(R.string.status_stopped));
+    fatigueStatusView.setText(getString(R.string.status_local_stopped));
+    startButton.setEnabled(true);
+    stopButton.setEnabled(false);
+    recordButton.setEnabled(false);
+    updateRecordButton();
+  }
+
+  private void startCameraThreadIfNeeded() {
+    if (cameraThread != null) {
+      return;
+    }
+    cameraThread = new HandlerThread("camera2-yuv-thread");
+    cameraThread.start();
+    cameraHandler = new Handler(cameraThread.getLooper());
+  }
+
+  private void stopCameraThreadIfNeeded() {
+    HandlerThread thread = cameraThread;
+    cameraThread = null;
+    cameraHandler = null;
+    if (thread == null) {
+      return;
+    }
+    thread.quitSafely();
+    try {
+      thread.join(1500L);
+    } catch (InterruptedException ignored) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  @SuppressLint("MissingPermission")
+  private void openCameraIfReady() {
+    if (!captureStarted || cameraDevice != null) {
+      return;
+    }
+    CameraManager manager = cameraManager;
+    Handler handler = cameraHandler;
+    if (manager == null || handler == null) {
+      return;
+    }
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+      return;
+    }
+
+    try {
+      String cameraId = resolveFrontCameraId(manager);
+      manager.openCamera(cameraId, cameraStateCallback, handler);
+    } catch (Exception error) {
+      statusView.setText(getString(R.string.status_error, error.getClass().getSimpleName()));
+    }
+  }
+
+  @NonNull
+  private String resolveFrontCameraId(@NonNull CameraManager manager) throws CameraAccessException {
+    String[] cameraIds = manager.getCameraIdList();
+    if (cameraIds.length == 0) {
+      throw new IllegalStateException("No camera device");
+    }
+
+    for (String cameraId : cameraIds) {
+      CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
+      Integer lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING);
+      if (lensFacing != null && lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+        Integer sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+        frontCameraSensorOrientation = sensorOrientation == null ? 0 : sensorOrientation;
+        frontCameraLensFacing = lensFacing;
+        openedCameraId = cameraId;
+        updateRecordingSize(characteristics);
+        updatePreviewSize(characteristics);
+        updateAnalysisConfig(characteristics);
+        updateQualityModeConfig(characteristics);
+        return cameraId;
+      }
+    }
+
+    String fallback = cameraIds[0];
+    CameraCharacteristics characteristics = manager.getCameraCharacteristics(fallback);
+    Integer sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+    Integer lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING);
+    frontCameraSensorOrientation = sensorOrientation == null ? 0 : sensorOrientation;
+    frontCameraLensFacing = lensFacing == null ? CameraCharacteristics.LENS_FACING_FRONT : lensFacing;
+    openedCameraId = fallback;
+    updateRecordingSize(characteristics);
+    updatePreviewSize(characteristics);
+    updateAnalysisConfig(characteristics);
+    updateQualityModeConfig(characteristics);
+    return fallback;
+  }
+
+  private void updateRecordingSize(@NonNull CameraCharacteristics characteristics) {
+    StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+    Size selected = chooseRecordingSize(map == null ? null : map.getOutputSizes(MediaRecorder.class));
+    recordWidth = selected.getWidth();
+    recordHeight = selected.getHeight();
+  }
+
+  private void updatePreviewSize(@NonNull CameraCharacteristics characteristics) {
+    StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+    Size selected = choosePreviewSize(map == null ? null : map.getOutputSizes(SurfaceTexture.class), recordWidth, recordHeight);
+    previewWidth = selected.getWidth();
+    previewHeight = selected.getHeight();
+  }
+
+  private void updateAnalysisConfig(@NonNull CameraCharacteristics characteristics) {
+    StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+    Size selected = chooseAnalysisSize(map == null ? null : map.getOutputSizes(ImageFormat.YUV_420_888));
+    analysisWidth = selected.getWidth();
+    analysisHeight = selected.getHeight();
+  }
+
+  private void updateQualityModeConfig(@NonNull CameraCharacteristics characteristics) {
+    int[] noiseModes = characteristics.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES);
+    int[] edgeModes = characteristics.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES);
+    int[] toneMapModes = characteristics.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES);
+    Boolean aeLock = characteristics.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE);
+    Boolean awbLock = characteristics.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE);
+
+    noiseReductionMode = choosePreferredMode(
+      noiseModes,
+      CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY,
+      CaptureRequest.NOISE_REDUCTION_MODE_FAST
+    );
+    edgeMode = choosePreferredMode(
+      edgeModes,
+      CaptureRequest.EDGE_MODE_HIGH_QUALITY,
+      CaptureRequest.EDGE_MODE_FAST
+    );
+    toneMapMode = choosePreferredMode(
+      toneMapModes,
+      CaptureRequest.TONEMAP_MODE_HIGH_QUALITY,
+      CaptureRequest.TONEMAP_MODE_FAST
+    );
+    aeLockAvailable = aeLock != null && aeLock;
+    awbLockAvailable = awbLock != null && awbLock;
+  }
+
+  @NonNull
+  private Size chooseRecordingSize(@Nullable Size[] sizes) {
+    if (sizes == null || sizes.length == 0) {
+      return new Size(DEFAULT_RECORD_WIDTH, DEFAULT_RECORD_HEIGHT);
+    }
+
+    for (Size size : sizes) {
+      if (size.getWidth() == 1280 && size.getHeight() == 720) {
+        return size;
+      }
+    }
+    for (Size size : sizes) {
+      if (size.getWidth() == 1920 && size.getHeight() == 1080) {
+        return size;
+      }
+    }
+
+    Size bestUnder720p = null;
+    for (Size size : sizes) {
+      if (size.getWidth() <= 1280 && size.getHeight() <= 720) {
+        if (bestUnder720p == null || (size.getWidth() * size.getHeight()) > (bestUnder720p.getWidth() * bestUnder720p.getHeight())) {
+          bestUnder720p = size;
+        }
+      }
+    }
+    if (bestUnder720p != null) {
+      return bestUnder720p;
+    }
+
+    Size largest = sizes[0];
+    for (Size size : sizes) {
+      if ((size.getWidth() * size.getHeight()) > (largest.getWidth() * largest.getHeight())) {
+        largest = size;
+      }
+    }
+    return largest;
+  }
+
+  @NonNull
+  private Size choosePreviewSize(@Nullable Size[] sizes, int targetW, int targetH) {
+    if (sizes == null || sizes.length == 0) {
+      return new Size(targetW, targetH);
+    }
+    long targetRatioNum = targetW;
+    long targetRatioDen = targetH;
+
+    Size best = null;
+    for (Size size : sizes) {
+      long w = size.getWidth();
+      long h = size.getHeight();
+      if (w * targetRatioDen != h * targetRatioNum) {
+        continue;
+      }
+      if (best == null || (w * h) > ((long) best.getWidth() * best.getHeight())) {
+        best = size;
+      }
+    }
+    if (best != null) {
+      return best;
+    }
+
+    Size fallback = sizes[0];
+    for (Size size : sizes) {
+      if ((long) size.getWidth() * size.getHeight() > (long) fallback.getWidth() * fallback.getHeight()) {
+        fallback = size;
+      }
+    }
+    return fallback;
+  }
+
+  @NonNull
+  private Size chooseAnalysisSize(@Nullable Size[] sizes) {
+    if (sizes == null || sizes.length == 0) {
+      return new Size(ANALYSIS_TARGET_WIDTH, ANALYSIS_TARGET_HEIGHT);
+    }
+
+    for (Size size : sizes) {
+      if (size.getWidth() == ANALYSIS_TARGET_WIDTH && size.getHeight() == ANALYSIS_TARGET_HEIGHT) {
+        return size;
+      }
+    }
+    for (Size size : sizes) {
+      if (size.getWidth() == 1920 && size.getHeight() == 1080) {
+        return size;
+      }
+    }
+
+    Size minAboveTarget = null;
+    for (Size size : sizes) {
+      if (size.getWidth() < ANALYSIS_TARGET_WIDTH || size.getHeight() < ANALYSIS_TARGET_HEIGHT) {
+        continue;
+      }
+      if (size.getWidth() * 9 != size.getHeight() * 16) {
+        continue;
+      }
+      if (minAboveTarget == null || (size.getWidth() * size.getHeight()) < (minAboveTarget.getWidth() * minAboveTarget.getHeight())) {
+        minAboveTarget = size;
+      }
+    }
+    if (minAboveTarget != null) {
+      return minAboveTarget;
+    }
+
+    Size best169 = null;
+    for (Size size : sizes) {
+      if (size.getWidth() * 9 != size.getHeight() * 16) {
+        continue;
+      }
+      if (best169 == null || (size.getWidth() * size.getHeight()) > (best169.getWidth() * best169.getHeight())) {
+        best169 = size;
+      }
+    }
+    if (best169 != null) {
+      return best169;
+    }
+
+    Size largest = sizes[0];
+    for (Size size : sizes) {
+      if ((size.getWidth() * size.getHeight()) > (largest.getWidth() * largest.getHeight())) {
+        largest = size;
+      }
+    }
+    return largest;
+  }
+
+  private int choosePreferredMode(@Nullable int[] modes, int preferred, int fallback) {
+    if (modes == null || modes.length == 0) {
+      return fallback;
+    }
+    for (int mode : modes) {
+      if (mode == preferred) {
+        return preferred;
+      }
+    }
+    for (int mode : modes) {
+      if (mode == fallback) {
+        return fallback;
+      }
+    }
+    return modes[0];
+  }
+
+  private final CameraDevice.StateCallback cameraStateCallback = new CameraDevice.StateCallback() {
+    @Override
+    public void onOpened(@NonNull CameraDevice camera) {
+      cameraDevice = camera;
+      createCaptureSession(false, false);
+    }
+
+    @Override
+    public void onDisconnected(@NonNull CameraDevice camera) {
+      camera.close();
+      cameraDevice = null;
+    }
+
+    @Override
+    public void onError(@NonNull CameraDevice camera, int error) {
+      camera.close();
+      cameraDevice = null;
+      runOnUiThread(() -> statusView.setText(getString(R.string.status_camera_failed, error)));
+    }
+  };
+
+  private void createCaptureSession(boolean withRecorder, boolean startRecorderOnConfigured) {
+    CameraDevice device = cameraDevice;
+    Handler handler = cameraHandler;
+    if (device == null || handler == null || !previewView.isAvailable()) {
+      return;
+    }
+
+    try {
+      ImageReader reader = imageReader;
+      if (withRecorder) {
+        // Some devices show green recording when analysis stream is kept alive.
+        if (reader != null) {
+          reader.close();
+          imageReader = null;
+          reader = null;
+        }
+        synchronized (latestYuvFrameLock) {
+          latestYuvFrame = null;
+        }
+      } else if (reader == null) {
+        reader = ImageReader.newInstance(analysisWidth, analysisHeight, ImageFormat.YUV_420_888, 2);
+        reader.setOnImageAvailableListener(this::onImageAvailable, handler);
+        imageReader = reader;
+      }
+
+      SurfaceTexture surfaceTexture = previewView.getSurfaceTexture();
+      if (surfaceTexture == null) {
+        return;
+      }
+      surfaceTexture.setDefaultBufferSize(previewWidth, previewHeight);
+      Surface previewSurface = new Surface(surfaceTexture);
+      Surface yuvSurface = reader == null ? null : reader.getSurface();
+
+      List<Surface> surfaces = new ArrayList<>();
+      surfaces.add(previewSurface);
+      // Some devices produce green recordings when recorder + YUV analysis run together.
+      // During recording, keep only preview + recorder streams.
+      if (!withRecorder && yuvSurface != null) {
+        surfaces.add(yuvSurface);
+      }
+      if (withRecorder && recorderSurface != null) {
+        surfaces.add(recorderSurface);
+      }
+
+      CameraCaptureSession oldSession = captureSession;
+      captureSession = null;
+      if (oldSession != null) {
+        try {
+          oldSession.stopRepeating();
+        } catch (Exception ignored) {
+        }
+        oldSession.close();
+      }
+
+      int template = withRecorder ? CameraDevice.TEMPLATE_RECORD : CameraDevice.TEMPLATE_PREVIEW;
+      device.createCaptureSession(
+        surfaces,
+        new CameraCaptureSession.StateCallback() {
+          @Override
+          public void onConfigured(@NonNull CameraCaptureSession session) {
+            if (cameraDevice == null) {
+              session.close();
+              return;
+            }
+            captureSession = session;
+            try {
+              CaptureRequest.Builder builder = cameraDevice.createCaptureRequest(template);
+              builder.addTarget(previewSurface);
+              if (!withRecorder && yuvSurface != null) {
+                builder.addTarget(yuvSurface);
+              }
+              if (withRecorder && recorderSurface != null) {
+                builder.addTarget(recorderSurface);
+              }
+              applyHighQualityCaptureParams(builder, withRecorder);
+              if (!withRecorder) {
+                previewRequestBuilder = builder;
+                aeAwbStableFrames = 0;
+                aeAwbLocked = !aeLockAvailable && !awbLockAvailable;
+              } else {
+                previewRequestBuilder = null;
+              }
+              session.setRepeatingRequest(
+                builder.build(),
+                withRecorder ? null : previewCaptureCallback,
+                handler
+              );
+
+              if (withRecorder && startRecorderOnConfigured) {
+                startMediaRecorderAfterSessionReady();
+              }
+            } catch (Exception error) {
+              runOnUiThread(() -> statusView.setText(getString(R.string.status_error, error.getClass().getSimpleName())));
+            }
+          }
+
+          @Override
+          public void onConfigureFailed(@NonNull CameraCaptureSession session) {
+            runOnUiThread(() -> statusView.setText(getString(R.string.status_session_failed)));
+          }
+        },
+        handler
+      );
+    } catch (Exception error) {
+      statusView.setText(getString(R.string.status_error, error.getClass().getSimpleName()));
+    }
+  }
+
+  private void applyHighQualityCaptureParams(@NonNull CaptureRequest.Builder builder, boolean withRecorder) {
+    builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
+    if (!withRecorder) {
+      builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(15, 30));
+    }
+
+    builder.set(CaptureRequest.NOISE_REDUCTION_MODE, noiseReductionMode);
+    builder.set(CaptureRequest.EDGE_MODE, edgeMode);
+    builder.set(CaptureRequest.TONEMAP_MODE, toneMapMode);
+
+    if (!withRecorder) {
+      if (aeLockAvailable) {
+        builder.set(CaptureRequest.CONTROL_AE_LOCK, false);
+      }
+      if (awbLockAvailable) {
+        builder.set(CaptureRequest.CONTROL_AWB_LOCK, false);
+      }
+    }
+  }
+
+  private void maybeLockAeAwb(@NonNull CameraCaptureSession session, @NonNull CaptureResult result) {
+    CaptureRequest.Builder builder = previewRequestBuilder;
+    Handler handler = cameraHandler;
+    if (builder == null || handler == null || aeAwbLocked) {
+      return;
+    }
+
+    boolean aeStable = !aeLockAvailable || isAeStable(result.get(CaptureResult.CONTROL_AE_STATE));
+    boolean awbStable = !awbLockAvailable || isAwbStable(result.get(CaptureResult.CONTROL_AWB_STATE));
+    if (aeStable && awbStable) {
+      aeAwbStableFrames++;
+    } else {
+      aeAwbStableFrames = 0;
+    }
+    if (aeAwbStableFrames < AE_AWB_STABLE_FRAME_COUNT) {
+      return;
+    }
+
+    try {
+      if (aeLockAvailable) {
+        builder.set(CaptureRequest.CONTROL_AE_LOCK, true);
+      }
+      if (awbLockAvailable) {
+        builder.set(CaptureRequest.CONTROL_AWB_LOCK, true);
+      }
+      session.setRepeatingRequest(builder.build(), previewCaptureCallback, handler);
+      aeAwbLocked = true;
+    } catch (Exception error) {
+      Log.w(TAG, "Failed to lock AE/AWB", error);
+    }
+  }
+
+  private boolean isAeStable(@Nullable Integer state) {
+    if (state == null) {
+      return false;
+    }
+    return state == CaptureResult.CONTROL_AE_STATE_CONVERGED
+      || state == CaptureResult.CONTROL_AE_STATE_LOCKED
+      || state == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED;
+  }
+
+  private boolean isAwbStable(@Nullable Integer state) {
+    if (state == null) {
+      return false;
+    }
+    return state == CaptureResult.CONTROL_AWB_STATE_CONVERGED
+      || state == CaptureResult.CONTROL_AWB_STATE_LOCKED;
+  }
+
+  private void onImageAvailable(@NonNull ImageReader reader) {
+    Image image = reader.acquireLatestImage();
+    if (image == null) {
+      return;
+    }
+    try {
+      YuvFrame frame = convertImageToYuvFrame(image);
+      synchronized (latestYuvFrameLock) {
+        latestYuvFrame = frame;
+      }
+    } catch (Exception error) {
+      Log.w(TAG, "onImageAvailable convert failed", error);
+    } finally {
+      image.close();
+    }
+  }
+
+  private void startPreviewUploadLoop() {
+    if (previewUploadLoopRunning) {
+      return;
+    }
+    previewUploadLoopRunning = true;
+    previewView.removeCallbacks(previewUploadRunnable);
+    previewView.post(previewUploadRunnable);
+  }
+
+  private void stopPreviewUploadLoop() {
+    previewUploadLoopRunning = false;
+    previewView.removeCallbacks(previewUploadRunnable);
+  }
+
+  private void uploadPreviewFrameTick() {
+    if (!previewUploadLoopRunning) {
+      return;
+    }
+    try {
+      if (captureStarted && !isRecording) {
+        maybeDumpProbeFrame();
+        if (tryReserveInferSlot()) {
+          LocalUploadFrame localFrame = convertYuvToLocalUploadFrame();
+          if (localFrame != null) {
+            dispatchLocalInferFrame(localFrame);
+            onFrameStatusTick(localFrame.frame);
+          } else {
+            maybeUpdateWaitingStatus();
+            inferTaskRunning.set(false);
+          }
+        }
+      }
+    } catch (Exception ignored) {
+      inferTaskRunning.set(false);
+    } finally {
+      if (previewUploadLoopRunning) {
+        previewView.postDelayed(previewUploadRunnable, PREVIEW_UPLOAD_TICK_MS);
+      }
+    }
+  }
+
+  @Nullable
+  private LocalUploadFrame convertYuvToLocalUploadFrame() {
+    YuvFrame yuvFrame = getLatestYuvFrame();
+    if (yuvFrame == null) {
+      return null;
+    }
+
+    LocalOnnxDetector detector;
+    try {
+      detector = getOrCreateLocalDetector();
+    } catch (Exception error) {
+      Log.w(TAG, "Local detector init failed", error);
+      return null;
+    }
+
+    try {
+      EncodedJpeg localFrame = encodeNormalizedNv21ToJpeg(yuvFrame, REPLAY_JPEG_QUALITY);
+      Bitmap modelBitmap = BitmapFactory.decodeByteArray(localFrame.jpeg, 0, localFrame.jpeg.length);
+      if (modelBitmap == null) {
+        return null;
+      }
+      FrameData frame = new FrameData(
+        localFrame.width,
+        localFrame.height,
+        0,
+        yuvFrame.timestampNs,
+        EMPTY_FRAME_BYTES
+      );
+      return new LocalUploadFrame(
+        frame,
+        localFrame.jpeg,
+        localFrame.jpeg,
+        modelBitmap,
+        "raw"
+      );
+    } catch (Exception error) {
+      Log.w(TAG, "Local frame encode/decode failed", error);
+      return null;
+    }
+  }
+
+  @Nullable
+  private YuvFrame getLatestYuvFrame() {
+    synchronized (latestYuvFrameLock) {
+      return latestYuvFrame;
+    }
+  }
+
+  @NonNull
+  private YuvFrame convertImageToYuvFrame(@NonNull Image image) {
+    int width = image.getWidth();
+    int height = image.getHeight();
+    byte[] nv21 = yuv420888ToNv21(image, width, height);
+    long timestampNs = image.getTimestamp() > 0L ? image.getTimestamp() : System.nanoTime();
+    return new YuvFrame(width, height, timestampNs, nv21);
+  }
+
+  @NonNull
+  private byte[] yuv420888ToNv21(@NonNull Image image, int width, int height) {
+    Image.Plane[] planes = image.getPlanes();
+    ByteBuffer yBuffer = planes[0].getBuffer();
+    ByteBuffer uBuffer = planes[1].getBuffer();
+    ByteBuffer vBuffer = planes[2].getBuffer();
+    int yRowStride = planes[0].getRowStride();
+    int yPixelStride = planes[0].getPixelStride();
+    int uRowStride = planes[1].getRowStride();
+    int uPixelStride = planes[1].getPixelStride();
+    int vRowStride = planes[2].getRowStride();
+    int vPixelStride = planes[2].getPixelStride();
+
+    byte[] nv21 = new byte[(width * height * 3) / 2];
+    int offset = 0;
+    for (int row = 0; row < height; row++) {
+      int yRowStart = row * yRowStride;
+      for (int col = 0; col < width; col++) {
+        nv21[offset++] = yBuffer.get(yRowStart + (col * yPixelStride));
+      }
+    }
+
+    int chromaHeight = height / 2;
+    int chromaWidth = width / 2;
+    for (int row = 0; row < chromaHeight; row++) {
+      int uRowStart = row * uRowStride;
+      int vRowStart = row * vRowStride;
+      for (int col = 0; col < chromaWidth; col++) {
+        nv21[offset++] = vBuffer.get(vRowStart + (col * vPixelStride));
+        nv21[offset++] = uBuffer.get(uRowStart + (col * uPixelStride));
+      }
+    }
+    return nv21;
+  }
+
+  @NonNull
+  private byte[] encodeNv21ToJpegFallback(@NonNull byte[] nv21, int width, int height, int jpegQuality) {
+    YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, width, height, null);
+    ByteArrayOutputStream outputStream = new ByteArrayOutputStream(width * height);
+    boolean ok = yuvImage.compressToJpeg(new Rect(0, 0, width, height), jpegQuality, outputStream);
+    if (!ok) {
+      throw new IllegalStateException("Failed to encode NV21 jpeg fallback");
+    }
+    return outputStream.toByteArray();
+  }
+
+  @NonNull
+  private EncodedJpeg encodeNormalizedNv21ToJpeg(@NonNull YuvFrame frame, int jpegQuality) {
+    byte[] jpeg = encodeNv21ToJpegFallback(frame.nv21, frame.width, frame.height, jpegQuality);
+    int rotationDegrees = computeStillFrameRotationDegrees();
+    if (rotationDegrees == 0) {
+      return new EncodedJpeg(jpeg, frame.width, frame.height);
+    }
+    byte[] rotatedJpeg = rotateJpeg(jpeg, rotationDegrees, jpegQuality);
+    boolean swapSize = rotationDegrees == 90 || rotationDegrees == 270;
+    int outWidth = swapSize ? frame.height : frame.width;
+    int outHeight = swapSize ? frame.width : frame.height;
+    return new EncodedJpeg(rotatedJpeg, outWidth, outHeight);
+  }
+
+  @NonNull
+  private byte[] rotateJpeg(@NonNull byte[] jpeg, int rotationDegrees, int jpegQuality) {
+    Bitmap src = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+    if (src == null) {
+      throw new IllegalStateException("Failed to decode JPEG for rotation");
+    }
+    Bitmap rotated = src;
+    try {
+      if (rotationDegrees != 0) {
+        Matrix matrix = new Matrix();
+        matrix.postRotate(rotationDegrees);
+        rotated = Bitmap.createBitmap(src, 0, 0, src.getWidth(), src.getHeight(), matrix, true);
+      }
+      ByteArrayOutputStream outputStream = new ByteArrayOutputStream(jpeg.length);
+      if (!rotated.compress(Bitmap.CompressFormat.JPEG, jpegQuality, outputStream)) {
+        throw new IllegalStateException("Failed to encode rotated JPEG");
+      }
+      return outputStream.toByteArray();
+    } finally {
+      if (rotated != src) {
+        rotated.recycle();
+      }
+      src.recycle();
+    }
+  }
+
+  private int computeVideoOrientationHint() {
+    int displayDegrees = getDisplayRotationDegrees();
+    if (frontCameraLensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+      int result = (frontCameraSensorOrientation + displayDegrees) % 360;
+      return (360 - result) % 360;
+    }
+    return (frontCameraSensorOrientation - displayDegrees + 360) % 360;
+  }
+
+  private int computeStillFrameRotationDegrees() {
+    int displayDegrees = getDisplayRotationDegrees();
+    if (frontCameraLensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+      return (frontCameraSensorOrientation + displayDegrees) % 360;
+    }
+    return (frontCameraSensorOrientation - displayDegrees + 360) % 360;
+  }
+
+  private int getDisplayRotationDegrees() {
+    int displayRotation;
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      displayRotation = getDisplay() == null ? Surface.ROTATION_0 : getDisplay().getRotation();
+    } else {
+      displayRotation = getWindowManager().getDefaultDisplay().getRotation();
+    }
+    switch (displayRotation) {
+      case Surface.ROTATION_90:
+        return 90;
+      case Surface.ROTATION_180:
+        return 180;
+      case Surface.ROTATION_270:
+        return 270;
+      case Surface.ROTATION_0:
+      default:
+        return 0;
+    }
+  }
+
+  private void onFrameStatusTick(@NonNull FrameData frame) {
     secondFrameCounter.incrementAndGet();
     long now = SystemClock.elapsedRealtime();
     if (now - lastStatusUpdateMs < 1000L) {
@@ -154,7 +1023,6 @@ public class MainActivity extends AppCompatActivity {
 
     int fps = secondFrameCounter.getAndSet(0);
     lastStatusUpdateMs = now;
-
     runOnUiThread(() -> statusView.setText(getString(
       R.string.status_running,
       frame.width,
@@ -165,232 +1033,692 @@ public class MainActivity extends AppCompatActivity {
     )));
   }
 
-  private boolean areAllPermissionsGranted(@NonNull Map<String, Boolean> result) {
-    for (Boolean granted : result.values()) {
-      if (!Boolean.TRUE.equals(granted)) {
-        return false;
-      }
-    }
-    return true;
+  private boolean tryReserveInferSlot() {
+    return inferTaskRunning.compareAndSet(false, true);
   }
 
-  private void probeNetworkStatus() {
-    if (networkCheckRunning) {
-      return;
-    }
-    networkCheckRunning = true;
-    checkNetworkButton.setEnabled(false);
-    networkStatusView.setText(String.format(
-      Locale.getDefault(),
-      "%s\n%s",
-      getString(R.string.network_status_target, eventsEndpointUrl()),
-      getString(R.string.network_status_checking)
-    ));
+  private void dispatchLocalInferFrame(@NonNull LocalUploadFrame uploadFrame) {
+    Bitmap modelBitmap = uploadFrame.modelBitmap;
 
-    networkExecutor.execute(() -> {
-      long startMs = SystemClock.elapsedRealtime();
-      NetworkProbeResult result = executeNetworkProbe();
-      long costMs = SystemClock.elapsedRealtime() - startMs;
-      runOnUiThread(() -> {
-        networkCheckRunning = false;
-        checkNetworkButton.setEnabled(true);
-        renderProbeResult(result, costMs);
-      });
+    inferExecutor.execute(() -> {
+      try {
+        LocalOnnxDetector detector = getOrCreateLocalDetector();
+        LocalOnnxDetector.Result result = detector.inferBitmap(modelBitmap);
+        LocalFatigueAnalyzer.Result fatigue = getOrCreateLocalFatigueAnalyzer().analyzeBitmap(modelBitmap);
+        secondInferenceCounter.incrementAndGet();
+        maybeDumpQualityReplay(uploadFrame, result);
+        maybeSaveLocalRecognizedPhoto(uploadFrame, result);
+
+        long finishedAt = SystemClock.elapsedRealtime();
+        if (finishedAt - lastInferStatusUpdateMs >= 1000L) {
+          int inferFps = secondInferenceCounter.getAndSet(0);
+          lastInferStatusUpdateMs = finishedAt;
+          runOnUiThread(() -> renderLocalInferStatus(result, fatigue, inferFps));
+        }
+      } catch (Exception error) {
+        Log.e(TAG, "Local ONNX infer failed", error);
+        runOnUiThread(() -> fatigueStatusView.setText(
+          getString(R.string.status_local_error, formatError(error))
+        ));
+      } finally {
+        modelBitmap.recycle();
+        inferTaskRunning.set(false);
+      }
     });
   }
 
-  @NonNull
-  private NetworkProbeResult executeNetworkProbe() {
-    UploaderConfig uploaderConfig = new UploaderConfig(
-      BuildConfig.DRIVESERVER_BASE_URL,
-      BuildConfig.DRIVESERVER_DEVICE_TOKEN,
-      "/api/v1/events",
-      NETWORK_CONNECT_TIMEOUT,
-      NETWORK_REQUEST_TIMEOUT
+  private void renderLocalInferStatus(
+    @NonNull LocalOnnxDetector.Result result,
+    @NonNull LocalFatigueAnalyzer.Result fatigue,
+    int inferFps
+  ) {
+    String base = getString(
+      R.string.status_local_running,
+      inferFps,
+      result.totalLatencyMs,
+      result.inferenceLatencyMs,
+      result.detections,
+      result.maxScore,
+      result.outputShape
     );
-    String endpoint = uploaderConfig.endpointUrl();
-    try {
-      EventUploader uploader = new EventUploader(
-        uploaderConfig,
-        new HttpEventsApiTransport(uploaderConfig.getConnectTimeout())
-      );
-      UploadReceipt receipt = uploader.upload(buildProbeEvent());
-      if (receipt.getTransportError() != null) {
-        return NetworkProbeResult.failure(endpoint, receipt.getTransportError());
-      }
+    String warningLine = fatigue.drowsy
+      ? getString(R.string.status_fatigue_warning, fatigue.eventSummary)
+      : getString(R.string.status_fatigue_normal);
+    fatigueStatusView.setText(base + "\n" + warningLine + "\n" + fatigue.summaryText());
+    maybeShowFatigueWarningToast(fatigue);
+  }
 
-      Integer httpStatus = receipt.getHttpStatus();
-      return NetworkProbeResult.response(
-        endpoint,
-        httpStatus == null ? 0 : httpStatus,
-        receipt.getCode(),
-        receipt.getTraceId()
-      );
+  private void maybeShowFatigueWarningToast(@NonNull LocalFatigueAnalyzer.Result fatigue) {
+    if (!fatigue.drowsy) {
+      return;
+    }
+    long now = SystemClock.elapsedRealtime();
+    if (now - lastFatigueWarningToastMs < 3000L) {
+      return;
+    }
+    lastFatigueWarningToastMs = now;
+    Toast.makeText(
+      this,
+      getString(R.string.toast_fatigue_warning, fatigue.eventSummary),
+      Toast.LENGTH_SHORT
+    ).show();
+    playFatigueWarningTone();
+  }
+
+  private void playFatigueWarningTone() {
+    ToneGenerator toneGenerator = getOrCreateFatigueToneGenerator();
+    if (toneGenerator == null) {
+      return;
+    }
+    try {
+      toneGenerator.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 700);
     } catch (Exception error) {
-      String message = error.getClass().getSimpleName();
-      if (error.getMessage() != null && !error.getMessage().isEmpty()) {
-        message += ": " + error.getMessage();
-      }
-      return NetworkProbeResult.failure(endpoint, message);
+      Log.w(TAG, "Failed to play fatigue warning tone", error);
     }
   }
 
-  private void renderProbeResult(@NonNull NetworkProbeResult result, long costMs) {
-    String endpointLine = getString(R.string.network_status_target, result.endpoint);
-    if (result.errorMessage != null) {
-      networkStatusView.setText(String.format(
-        Locale.getDefault(),
-        "%s\n%s",
-        endpointLine,
-        getString(R.string.network_status_failed, result.errorMessage)
-      ));
+  @Nullable
+  private ToneGenerator getOrCreateFatigueToneGenerator() {
+    ToneGenerator generator = fatigueToneGenerator;
+    if (generator != null) {
+      return generator;
+    }
+    try {
+      generator = new ToneGenerator(AudioManager.STREAM_ALARM, 90);
+      fatigueToneGenerator = generator;
+      return generator;
+    } catch (Exception error) {
+      Log.w(TAG, "Failed to create fatigue tone generator", error);
+      return null;
+    }
+  }
+
+  private void releaseFatigueToneGenerator() {
+    ToneGenerator generator = fatigueToneGenerator;
+    fatigueToneGenerator = null;
+    if (generator == null) {
+      return;
+    }
+    try {
+      generator.release();
+    } catch (Exception ignored) {
+    }
+  }
+
+  private void maybeDumpQualityReplay(@NonNull LocalUploadFrame frame, @NonNull LocalOnnxDetector.Result result) {
+    long now = SystemClock.elapsedRealtime();
+    if (now - lastReplayDumpMs < REPLAY_DUMP_INTERVAL_MS) {
+      return;
+    }
+    lastReplayDumpMs = now;
+
+    try {
+      long tsMs = frame.frame.timestampNs / 1_000_000L;
+      String prefix = String.format(Locale.US, "%d_%s", tsMs, frame.qualityTag);
+
+      File root = qualityReplayDir();
+      File rawDir = ensureSubDir(root, "raw");
+      File enhancedDir = ensureSubDir(root, "enhanced");
+      File modelDir = ensureSubDir(root, "model");
+      File overlayDir = ensureSubDir(root, "overlay");
+
+      writeBytes(frame.rawJpeg, new File(rawDir, prefix + "_raw.jpg"));
+      writeBytes(frame.enhancedJpeg, new File(enhancedDir, prefix + "_enhanced.jpg"));
+      writeBitmapJpeg(frame.modelBitmap, new File(modelDir, prefix + "_model.jpg"), REPLAY_JPEG_QUALITY);
+
+      Bitmap overlay = drawOverlay(frame.modelBitmap, result);
+      try {
+        writeBitmapJpeg(overlay, new File(overlayDir, prefix + "_overlay.jpg"), REPLAY_JPEG_QUALITY);
+      } finally {
+        overlay.recycle();
+      }
+    } catch (Exception error) {
+      Log.w(TAG, "Failed to dump quality replay", error);
+    }
+  }
+
+  private void maybeSaveLocalRecognizedPhoto(@NonNull LocalUploadFrame frame, @NonNull LocalOnnxDetector.Result result) {
+    if (result.detections <= 0) {
       return;
     }
 
-    String codeText = result.businessCode == null ? "-" : String.valueOf(result.businessCode);
-    String traceIdText = (result.traceId == null || result.traceId.isEmpty()) ? "-" : result.traceId;
-    String resultLine = getString(
-      R.string.network_status_result,
-      result.httpStatus,
-      codeText,
-      traceIdText,
-      costMs
-    );
+    try {
+      long tsMs = frame.frame.timestampNs / 1_000_000L;
+      String prefix = String.format(Locale.US, "%d_det%d_%.2f", tsMs, result.detections, result.maxScore);
 
-    String diagnosis;
-    if (result.httpStatus == 401 || (result.businessCode != null && result.businessCode == 40101)) {
-      diagnosis = "链路已通，服务端已返回鉴权失败（token 无效或过期）";
-    } else if (result.httpStatus >= 200 && result.httpStatus < 300) {
-      diagnosis = "链路已通，客户端与服务端通信正常";
-    } else {
-      diagnosis = "链路已通，但服务端返回了业务或网关异常";
+      File root = qualityReplayDir();
+      File detectedDir = ensureSubDir(root, "local_detected");
+
+      writeBitmapJpeg(frame.modelBitmap, new File(detectedDir, prefix + "_frame.jpg"), REPLAY_JPEG_QUALITY);
+      Bitmap overlay = drawOverlay(frame.modelBitmap, result);
+      try {
+        writeBitmapJpeg(overlay, new File(detectedDir, prefix + "_overlay.jpg"), REPLAY_JPEG_QUALITY);
+      } finally {
+        overlay.recycle();
+      }
+    } catch (Exception error) {
+      Log.w(TAG, "Failed to save local recognized photo", error);
     }
+  }
 
-    networkStatusView.setText(String.format(
-      Locale.getDefault(),
-      "%s\n%s\n%s",
-      endpointLine,
-      resultLine,
-      diagnosis
+  private void maybeDumpProbeFrame() {
+    long now = SystemClock.elapsedRealtime();
+    if (now - lastProbeDumpMs < PROBE_DUMP_INTERVAL_MS) {
+      return;
+    }
+    lastProbeDumpMs = now;
+
+    try {
+      YuvFrame yuvFrame = getLatestYuvFrame();
+      if (yuvFrame == null) {
+        return;
+      }
+      EncodedJpeg jpeg = encodeNormalizedNv21ToJpeg(yuvFrame, REPLAY_JPEG_QUALITY);
+      long tsMs = yuvFrame.timestampNs / 1_000_000L;
+      String source = "camera2_yuv";
+
+      File root = qualityReplayDir();
+      File probeDir = ensureSubDir(root, "probe");
+      String filename = String.format(Locale.US, "%d_probe_%s.jpg", tsMs, source);
+      writeBytes(jpeg.jpeg, new File(probeDir, filename));
+    } catch (Exception error) {
+      Log.w(TAG, "Failed to dump probe frame", error);
+    }
+  }
+
+  @NonNull
+  private Bitmap drawOverlay(@NonNull Bitmap input, @NonNull LocalOnnxDetector.Result result) {
+    Bitmap overlay = input.copy(Bitmap.Config.ARGB_8888, true);
+    Canvas canvas = new Canvas(overlay);
+
+    Paint boxPaint = new Paint();
+    boxPaint.setStyle(Paint.Style.STROKE);
+    boxPaint.setStrokeWidth(3f);
+    boxPaint.setColor(Color.GREEN);
+
+    Paint textPaint = new Paint();
+    textPaint.setColor(Color.YELLOW);
+    textPaint.setTextSize(20f);
+    textPaint.setStyle(Paint.Style.FILL);
+
+    for (LocalOnnxDetector.Box box : result.boxes) {
+      boxPaint.setColor(colorForClass(box.classId));
+      canvas.drawRect(box.left, box.top, box.right, box.bottom, boxPaint);
+      String label = localClassName(box.classId) + String.format(Locale.US, " %.2f", box.score);
+      float textY = Math.max(18f, box.top - 6f);
+      canvas.drawText(label, box.left + 2f, textY, textPaint);
+    }
+    return overlay;
+  }
+
+  @NonNull
+  private String truncate(@NonNull String value, int maxChars) {
+    if (value.length() <= maxChars) {
+      return value;
+    }
+    return value.substring(0, Math.max(0, maxChars - 1)) + "...";
+  }
+
+  private int colorForClass(int classId) {
+    switch (classId) {
+      case 0:
+        return Color.RED;
+      case 1:
+        return Color.CYAN;
+      case 2:
+        return Color.GREEN;
+      case 3:
+        return Color.YELLOW;
+      default:
+        return Color.WHITE;
+    }
+  }
+
+  @NonNull
+  private String localClassName(int classId) {
+    if (classId >= 0 && classId < LOCAL_CLASS_NAMES.length) {
+      return LOCAL_CLASS_NAMES[classId];
+    }
+    return "cls" + classId;
+  }
+
+  private void writeBitmapJpeg(@NonNull Bitmap bitmap, @NonNull File output, int quality) throws Exception {
+    File parent = output.getParentFile();
+    if (parent != null && !parent.exists() && !parent.mkdirs()) {
+      throw new IOException("Failed to create replay directory");
+    }
+    try (FileOutputStream stream = new FileOutputStream(output, false)) {
+      boolean ok = bitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream);
+      if (!ok) {
+        throw new IOException("Failed to compress bitmap");
+      }
+      stream.flush();
+    }
+  }
+
+  private void writeBytes(@NonNull byte[] data, @NonNull File output) throws Exception {
+    File parent = output.getParentFile();
+    if (parent != null && !parent.exists() && !parent.mkdirs()) {
+      throw new IOException("Failed to create replay directory");
+    }
+    try (FileOutputStream stream = new FileOutputStream(output, false)) {
+      stream.write(data);
+      stream.flush();
+    }
+  }
+
+  @NonNull
+  private File qualityReplayDir() {
+    File externalDir = getExternalFilesDir(null);
+    File root = externalDir == null ? getFilesDir() : externalDir;
+    File dir = new File(root, "quality_replay");
+    if (!dir.exists()) {
+      dir.mkdirs();
+    }
+    return dir;
+  }
+
+  @NonNull
+  private File ensureSubDir(@NonNull File root, @NonNull String name) {
+    File dir = new File(root, name);
+    if (!dir.exists()) {
+      dir.mkdirs();
+    }
+    return dir;
+  }
+
+  private void resetInferSession() {
+    inferSessionId = "sess-" + System.currentTimeMillis();
+    secondInferenceCounter.set(0);
+    lastInferStatusUpdateMs = 0L;
+    lastWaitingStatusMs = 0L;
+    updateInferIdleStatus();
+  }
+
+  private void updateInferIdleStatus() {
+    fatigueStatusView.setText(getString(
+      R.string.status_local_idle,
+      LOCAL_MODEL_ASSET_PATH,
+      inferSessionId
     ));
   }
 
-  @NonNull
-  private String eventsEndpointUrl() {
-    String base = BuildConfig.DRIVESERVER_BASE_URL;
-    if (base.endsWith("/")) {
-      return base + "api/v1/events";
+  private void maybeUpdateWaitingStatus() {
+    long now = SystemClock.elapsedRealtime();
+    if (now - lastWaitingStatusMs < WAITING_STATUS_INTERVAL_MS) {
+      return;
     }
-    return base + "/api/v1/events";
+    lastWaitingStatusMs = now;
+    fatigueStatusView.setText("本地疲劳检测：等待相机帧");
   }
 
   @NonNull
-  private EdgeEvent buildProbeEvent() {
-    long nowMs = System.currentTimeMillis();
-    return new EdgeEvent(
-      "evt_probe_" + nowMs,
-      "fleet-local",
-      "VEH-LOCAL-001",
-      "DRV-LOCAL-001",
-      Instant.ofEpochMilli(nowMs).toString(),
-      0.72,
-      0.28,
-      RiskLevel.LOW,
-      null,
-      Collections.emptySet(),
-      "edge-probe-v1",
-      UploadStatus.PENDING,
-      nowMs - 3_000L,
-      nowMs,
-      nowMs
-    );
-  }
-
-  private static final class NetworkProbeResult {
-    @NonNull
-    final String endpoint;
-    final int httpStatus;
-    @Nullable
-    final Integer businessCode;
-    @Nullable
-    final String traceId;
-    @Nullable
-    final String errorMessage;
-
-    private NetworkProbeResult(
-      @NonNull String endpoint,
-      int httpStatus,
-      @Nullable Integer businessCode,
-      @Nullable String traceId,
-      @Nullable String errorMessage
-    ) {
-      this.endpoint = endpoint;
-      this.httpStatus = httpStatus;
-      this.businessCode = businessCode;
-      this.traceId = traceId;
-      this.errorMessage = errorMessage;
-    }
-
-    @NonNull
-    static NetworkProbeResult response(
-      @NonNull String endpoint,
-      int httpStatus,
-      @Nullable Integer businessCode,
-      @Nullable String traceId
-    ) {
-      return new NetworkProbeResult(endpoint, httpStatus, businessCode, traceId, null);
-    }
-
-    @NonNull
-    static NetworkProbeResult failure(@NonNull String endpoint, @NonNull String errorMessage) {
-      return new NetworkProbeResult(endpoint, 0, null, null, errorMessage);
+  private LocalOnnxDetector getOrCreateLocalDetector() throws Exception {
+    synchronized (localOnnxDetectorLock) {
+      LocalOnnxDetector detector = localOnnxDetector;
+      if (detector != null) {
+        return detector;
+      }
+      detector = new LocalOnnxDetector(
+        getApplicationContext(),
+        LOCAL_MODEL_ASSET_PATH,
+        LOCAL_CONF_THRESHOLD,
+        LOCAL_NMS_THRESHOLD
+      );
+      localOnnxDetector = detector;
+      return detector;
     }
   }
 
-  private void ensurePermissionsThenStart() {
-    List<String> permissions = new ArrayList<>();
-    permissions.add(Manifest.permission.CAMERA);
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-      permissions.add(Manifest.permission.POST_NOTIFICATIONS);
+  private void releaseLocalDetector() {
+    synchronized (localOnnxDetectorLock) {
+      LocalOnnxDetector detector = localOnnxDetector;
+      localOnnxDetector = null;
+      if (detector != null) {
+        detector.close();
+      }
+    }
+  }
+
+  @NonNull
+  private LocalFatigueAnalyzer getOrCreateLocalFatigueAnalyzer() {
+    synchronized (localFatigueAnalyzerLock) {
+      LocalFatigueAnalyzer analyzer = localFatigueAnalyzer;
+      if (analyzer != null) {
+        return analyzer;
+      }
+      analyzer = new LocalFatigueAnalyzer(getApplicationContext(), LOCAL_FATIGUE_MODEL_ASSET_PATH);
+      localFatigueAnalyzer = analyzer;
+      return analyzer;
+    }
+  }
+
+  private void releaseLocalFatigueAnalyzer() {
+    synchronized (localFatigueAnalyzerLock) {
+      LocalFatigueAnalyzer analyzer = localFatigueAnalyzer;
+      localFatigueAnalyzer = null;
+      if (analyzer != null) {
+        analyzer.close();
+      }
+    }
+  }
+
+  @NonNull
+  private String formatError(@NonNull Throwable error) {
+    StringBuilder builder = new StringBuilder(error.getClass().getSimpleName());
+    Throwable cursor = error;
+    int depth = 0;
+    while (cursor != null && depth < 4) {
+      String message = cursor.getMessage();
+      if (message != null && !message.trim().isEmpty()) {
+        if (depth == 0) {
+          builder.append(": ").append(message);
+        } else {
+          builder.append(" | cause").append(depth).append(": ").append(message);
+        }
+      }
+      cursor = cursor.getCause();
+      depth++;
+    }
+    return builder.toString();
+  }
+
+  private void toggleRecording() {
+    if (!captureStarted) {
+      return;
+    }
+    if (isRecording) {
+      stopRecordingInternal(true);
+      return;
+    }
+    startRecordingInternal();
+  }
+
+  private void startRecordingInternal() {
+    Handler handler = cameraHandler;
+    if (handler == null || cameraDevice == null) {
+      Toast.makeText(this, R.string.recording_failed, Toast.LENGTH_SHORT).show();
+      return;
+    }
+    handler.post(() -> {
+      try {
+        prepareMediaRecorder();
+        createCaptureSession(true, true);
+      } catch (Exception error) {
+        releaseMediaRecorder();
+        runOnUiThread(() -> Toast.makeText(this, R.string.recording_failed, Toast.LENGTH_SHORT).show());
+      }
+    });
+  }
+
+  private void startMediaRecorderAfterSessionReady() {
+    MediaRecorder recorder = mediaRecorder;
+    if (recorder == null) {
+      return;
+    }
+    try {
+      recorder.start();
+      isRecording = true;
+      stopPreviewUploadLoop();
+      runOnUiThread(() -> {
+        updateRecordButton();
+        String path = recordingFile == null ? "-" : recordingFile.getAbsolutePath();
+        fatigueStatusView.setText("录制中：已暂停分析流（防止绿屏）");
+        Toast.makeText(this, getString(R.string.recording_started, path), Toast.LENGTH_LONG).show();
+      });
+    } catch (Exception error) {
+      isRecording = false;
+      runOnUiThread(() -> Toast.makeText(this, R.string.recording_failed, Toast.LENGTH_SHORT).show());
+    }
+  }
+
+  private void stopRecordingInternal(boolean recreatePreviewSession) {
+    Handler handler = cameraHandler;
+    if (handler == null) {
+      return;
+    }
+    handler.post(() -> {
+      if (!isRecording && mediaRecorder == null) {
+        return;
+      }
+
+      File output = recordingFile;
+      try {
+        MediaRecorder recorder = mediaRecorder;
+        if (recorder != null && isRecording) {
+          recorder.stop();
+        }
+      } catch (Exception stopError) {
+        if (output != null && output.exists()) {
+          output.delete();
+        }
+      } finally {
+        isRecording = false;
+        releaseMediaRecorder();
+        runOnUiThread(() -> {
+          updateRecordButton();
+          updateInferIdleStatus();
+          if (output != null && output.exists()) {
+            Toast.makeText(this, getString(R.string.recording_stopped, output.getAbsolutePath()), Toast.LENGTH_LONG).show();
+          }
+        });
+        if (recreatePreviewSession && captureStarted) {
+          createCaptureSession(false, false);
+          startPreviewUploadLoop();
+        }
+      }
+    });
+  }
+
+  private void prepareMediaRecorder() throws IOException {
+    File output = newRecordingFile();
+    MediaRecorder recorder = mediaRecorder;
+    if (recorder == null) {
+      recorder = new MediaRecorder();
+      mediaRecorder = recorder;
+    } else {
+      recorder.reset();
     }
 
-    List<String> missingPermissions = new ArrayList<>();
-    for (String permission : permissions) {
-      if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
-        missingPermissions.add(permission);
+    recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
+    recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+    recorder.setOutputFile(output.getAbsolutePath());
+    recorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+    recorder.setVideoFrameRate(24);
+    int targetBitrate = Math.max(2_000_000, Math.min(12_000_000, recordWidth * recordHeight * 5));
+    recorder.setVideoEncodingBitRate(targetBitrate);
+    recorder.setVideoSize(recordWidth, recordHeight);
+    recorder.setOrientationHint(computeVideoOrientationHint());
+    recorder.prepare();
+    recorderSurface = recorder.getSurface();
+    recordingFile = output;
+  }
+
+  private void releaseMediaRecorder() {
+    MediaRecorder recorder = mediaRecorder;
+    mediaRecorder = null;
+    recorderSurface = null;
+    if (recorder == null) {
+      return;
+    }
+    try {
+      recorder.reset();
+    } catch (Exception ignored) {
+    }
+    try {
+      recorder.release();
+    } catch (Exception ignored) {
+    }
+  }
+
+  @NonNull
+  private File recordingsDir() {
+    File externalDir = getExternalFilesDir(null);
+    File root = externalDir == null ? getFilesDir() : externalDir;
+    File dir = new File(root, "recordings");
+    if (!dir.exists()) {
+      dir.mkdirs();
+    }
+    return dir;
+  }
+
+  @NonNull
+  private File newRecordingFile() throws IOException {
+    String ts = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
+    File output = new File(recordingsDir(), "capture_" + ts + ".mp4");
+    if (output.exists() && !output.delete()) {
+      throw new IOException("Failed to replace existing output file");
+    }
+    return output;
+  }
+
+  private void openRecordingsDirectory() {
+    openExternalFilesSubDirectory("recordings", recordingsDir());
+  }
+
+  private void openQualityReplayDirectory() {
+    File replayDir = qualityReplayDir();
+    Toast.makeText(this, "质检目录: " + replayDir.getAbsolutePath(), Toast.LENGTH_LONG).show();
+    openExternalFilesSubDirectory("quality_replay", replayDir);
+  }
+
+  private void openExternalFilesSubDirectory(@NonNull String subdir, @NonNull File fallbackDir) {
+    String docId = "primary:Android/data/" + getPackageName() + "/files/" + subdir;
+    Uri initialUri = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", docId);
+
+    Intent directOpenIntent = new Intent(Intent.ACTION_VIEW);
+    directOpenIntent.setDataAndType(initialUri, DocumentsContract.Document.MIME_TYPE_DIR);
+    directOpenIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+    directOpenIntent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+
+    if (canHandleIntent(directOpenIntent)) {
+      try {
+        startActivity(directOpenIntent);
+        return;
+      } catch (ActivityNotFoundException ignored) {
+      } catch (SecurityException ignored) {
       }
     }
 
-    if (missingPermissions.isEmpty()) {
-      startCaptureAndBindService();
-      return;
+    Intent treeIntent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+    treeIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+    treeIntent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+    treeIntent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      treeIntent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
     }
 
-    permissionLauncher.launch(missingPermissions.toArray(new String[0]));
-  }
-
-  private void startCaptureAndBindService() {
-    CameraForegroundService.start(this);
-    if (isBound) {
-      return;
+    if (canHandleIntent(treeIntent)) {
+      try {
+        startActivity(treeIntent);
+        return;
+      } catch (ActivityNotFoundException ignored) {
+      } catch (SecurityException ignored) {
+      }
     }
 
-    Intent bindIntent = new Intent(this, CameraForegroundService.class);
-    bindService(bindIntent, serviceConnection, Context.BIND_AUTO_CREATE);
+    Toast.makeText(
+      this,
+      getString(R.string.open_recordings_fallback, fallbackDir.getAbsolutePath()),
+      Toast.LENGTH_LONG
+    ).show();
   }
 
-  private void stopCaptureService() {
-    if (isBound) {
-      captureService.setFrameListener(null);
-      captureService.detachPreview();
-      unbindService(serviceConnection);
-      captureService = null;
-      isBound = false;
+  private void updateRecordButton() {
+    recordButton.setText(isRecording ? R.string.record_stop : R.string.record_start);
+  }
+
+  private boolean canHandleIntent(@NonNull Intent intent) {
+    return intent.resolveActivity(getPackageManager()) != null;
+  }
+
+  private void closeCameraResources() {
+    previewRequestBuilder = null;
+    aeAwbStableFrames = 0;
+    aeAwbLocked = false;
+
+    CameraCaptureSession session = captureSession;
+    captureSession = null;
+    if (session != null) {
+      try {
+        session.stopRepeating();
+      } catch (Exception ignored) {
+      }
+      session.close();
     }
 
-    CameraForegroundService.stop(this);
-    statusView.setText(getString(R.string.status_stopped));
-    startButton.setEnabled(true);
-    stopButton.setEnabled(false);
+    CameraDevice device = cameraDevice;
+    cameraDevice = null;
+    if (device != null) {
+      device.close();
+    }
+
+    ImageReader reader = imageReader;
+    imageReader = null;
+    if (reader != null) {
+      reader.close();
+    }
+    synchronized (latestYuvFrameLock) {
+      latestYuvFrame = null;
+    }
+
+    releaseMediaRecorder();
+    isRecording = false;
   }
+
+  private static final class LocalUploadFrame {
+    @NonNull
+    final FrameData frame;
+    @NonNull
+    final byte[] rawJpeg;
+    @NonNull
+    final byte[] enhancedJpeg;
+    @NonNull
+    final Bitmap modelBitmap;
+    @NonNull
+    final String qualityTag;
+
+    LocalUploadFrame(
+      @NonNull FrameData frame,
+      @NonNull byte[] rawJpeg,
+      @NonNull byte[] enhancedJpeg,
+      @NonNull Bitmap modelBitmap,
+      @NonNull String qualityTag
+    ) {
+      this.frame = frame;
+      this.rawJpeg = rawJpeg;
+      this.enhancedJpeg = enhancedJpeg;
+      this.modelBitmap = modelBitmap;
+      this.qualityTag = qualityTag;
+    }
+  }
+
+  private static final class YuvFrame {
+    final int width;
+    final int height;
+    final long timestampNs;
+    @NonNull
+    final byte[] nv21;
+
+    YuvFrame(int width, int height, long timestampNs, @NonNull byte[] nv21) {
+      this.width = width;
+      this.height = height;
+      this.timestampNs = timestampNs;
+      this.nv21 = nv21;
+    }
+  }
+
+  private static final class EncodedJpeg {
+    @NonNull
+    final byte[] jpeg;
+    final int width;
+    final int height;
+
+    EncodedJpeg(@NonNull byte[] jpeg, int width, int height) {
+      this.jpeg = jpeg;
+      this.width = width;
+      this.height = height;
+    }
+  }
+
 }
