@@ -2,7 +2,9 @@ package com.driveedge.uploader
 
 import com.driveedge.event.center.EdgeEvent
 
-class EventUploader(
+class EventUploader
+  @JvmOverloads
+  constructor(
   private val config: UploaderConfig,
   private val transport: EventsApiTransport = HttpEventsApiTransport(connectTimeout = config.connectTimeout),
 ) {

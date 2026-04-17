@@ -16,6 +16,11 @@ android {
     targetSdk = 34
     versionCode = 1
     versionName = "0.1.0"
+    buildConfigField("String", "EDGE_DEVICE_TOKEN", "\"dev-device-token\"")
+    buildConfigField("String", "EDGE_FLEET_ID", "\"fleet_01\"")
+    buildConfigField("String", "EDGE_VEHICLE_ID", "\"veh_001\"")
+    buildConfigField("String", "EDGE_DRIVER_ID", "\"drv_001\"")
+    buildConfigField("String", "EDGE_ALGORITHM_VERSION", "\"local-fatigue-v1\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -24,9 +29,11 @@ android {
   productFlavors {
     create("simulator") {
       dimension = "endpoint"
+      buildConfigField("String", "EDGE_SERVER_BASE_URL", "\"http://10.0.2.2:8080\"")
     }
     create("hostlocal") {
       dimension = "endpoint"
+      buildConfigField("String", "EDGE_SERVER_BASE_URL", "\"http://127.0.0.1:8080\"")
     }
   }
 
@@ -56,4 +63,8 @@ dependencies {
   implementation("io.github.crow-misia.libyuv:libyuv-android:0.43.2")
   implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
   implementation("com.google.mediapipe:tasks-vision:latest.release")
+  implementation(project(":module-event-center"))
+  implementation(project(":module-risk-engine"))
+  implementation(project(":module-storage"))
+  implementation(project(":module-uploader"))
 }

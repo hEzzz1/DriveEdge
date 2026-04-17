@@ -2,7 +2,9 @@ package com.driveedge.uploader
 
 import java.time.Duration
 
-data class UploaderConfig(
+data class UploaderConfig
+  @JvmOverloads
+  constructor(
   val baseUrl: String,
   val deviceToken: String,
   val endpointPath: String = "/api/v1/events",

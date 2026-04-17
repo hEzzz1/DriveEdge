@@ -55,6 +55,7 @@ import androidx.core.content.ContextCompat;
 
 import com.driveedge.app.R;
 import com.driveedge.app.camera.FrameData;
+import com.driveedge.app.event.EdgeEventReporter;
 import com.driveedge.app.fatigue.LocalFatigueAnalyzer;
 import com.driveedge.app.fatigue.LocalOnnxDetector;
 
@@ -167,6 +168,10 @@ public final class MainActivity extends AppCompatActivity {
   private long lastFatigueWarningToastMs = 0L;
   @Nullable
   private ToneGenerator fatigueToneGenerator;
+  @Nullable
+  private EdgeEventReporter edgeEventReporter;
+  @NonNull
+  private volatile String edgeEventStatusLine = "事件上报：待触发";
   @NonNull
   private String inferSessionId = "session-init";
   @NonNull
@@ -248,6 +253,11 @@ public final class MainActivity extends AppCompatActivity {
     recordButton.setEnabled(false);
     updateRecordButton();
     resetInferSession();
+    edgeEventReporter =
+      new EdgeEventReporter(
+        getApplicationContext(),
+        statusLine -> runOnUiThread(() -> edgeEventStatusLine = statusLine)
+      );
     statusView.setText(getString(R.string.status_idle));
   }
 
@@ -257,6 +267,7 @@ public final class MainActivity extends AppCompatActivity {
     releaseLocalDetector();
     releaseLocalFatigueAnalyzer();
     releaseFatigueToneGenerator();
+    releaseEdgeEventReporter();
     inferExecutor.shutdownNow();
     super.onDestroy();
   }
@@ -1045,6 +1056,7 @@ public final class MainActivity extends AppCompatActivity {
         LocalOnnxDetector detector = getOrCreateLocalDetector();
         LocalOnnxDetector.Result result = detector.inferBitmap(modelBitmap);
         LocalFatigueAnalyzer.Result fatigue = getOrCreateLocalFatigueAnalyzer().analyzeBitmap(modelBitmap);
+        safeReportEdgeEvent(fatigue);
         secondInferenceCounter.incrementAndGet();
         maybeDumpQualityReplay(uploadFrame, result);
         maybeSaveLocalRecognizedPhoto(uploadFrame, result);
@@ -1084,8 +1096,25 @@ public final class MainActivity extends AppCompatActivity {
     String warningLine = fatigue.drowsy
       ? getString(R.string.status_fatigue_warning, fatigue.eventSummary)
       : getString(R.string.status_fatigue_normal);
-    fatigueStatusView.setText(base + "\n" + warningLine + "\n" + fatigue.summaryText());
+    fatigueStatusView.setText(base + "\n" + warningLine + "\n" + fatigue.summaryText() + "\n" + edgeEventStatusLine);
     maybeShowFatigueWarningToast(fatigue);
+  }
+
+  private void maybeReportEdgeEvent(@NonNull LocalFatigueAnalyzer.Result fatigue) {
+    EdgeEventReporter reporter = edgeEventReporter;
+    if (reporter == null) {
+      return;
+    }
+    reporter.reportFatigueResult(fatigue, System.currentTimeMillis());
+  }
+
+  private void safeReportEdgeEvent(@NonNull LocalFatigueAnalyzer.Result fatigue) {
+    try {
+      maybeReportEdgeEvent(fatigue);
+    } catch (Exception error) {
+      Log.e(TAG, "Edge event reporting failed", error);
+      edgeEventStatusLine = "事件上报：异常 " + error.getClass().getSimpleName();
+    }
   }
 
   private void maybeShowFatigueWarningToast(@NonNull LocalFatigueAnalyzer.Result fatigue) {
@@ -1141,6 +1170,18 @@ public final class MainActivity extends AppCompatActivity {
     }
     try {
       generator.release();
+    } catch (Exception ignored) {
+    }
+  }
+
+  private void releaseEdgeEventReporter() {
+    EdgeEventReporter reporter = edgeEventReporter;
+    edgeEventReporter = null;
+    if (reporter == null) {
+      return;
+    }
+    try {
+      reporter.close();
     } catch (Exception ignored) {
     }
   }

@@ -1,5 +1,7 @@
 # DriveEdge Android 相机链路联调文档（ForegroundService + CameraX）
 
+> 说明：本文档描述的是历史方案，保留用于回溯。当前主实现已切换为 `Camera2 + 本地推理 + /api/v1/events 上报 + 弱网重传`，请优先参考 [current-android-local-fatigue.md](/Users/m1ngyangg/Documents/DriveEdge/docs/current-android-local-fatigue.md)。
+
 ## 1. 文档信息
 - 项目：DriveEdge
 - 模块：`edge-app`

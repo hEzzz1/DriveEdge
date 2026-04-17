@@ -5,7 +5,9 @@ import java.time.Clock
 import java.time.Instant
 import kotlin.math.max
 
-class EventCenter(
+class EventCenter
+  @JvmOverloads
+  constructor(
   private val config: EventCenterConfig,
   private val eventStore: EdgeEventStore,
   private val eventIdGenerator: EventIdGenerator = EventIdGenerator(config.vehicleId),

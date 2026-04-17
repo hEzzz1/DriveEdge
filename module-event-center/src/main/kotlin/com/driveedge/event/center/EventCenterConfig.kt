@@ -1,6 +1,8 @@
 package com.driveedge.event.center
 
-data class EventCenterConfig(
+data class EventCenterConfig
+  @JvmOverloads
+  constructor(
   val vehicleId: String,
   val fleetId: String? = null,
   val driverId: String? = null,

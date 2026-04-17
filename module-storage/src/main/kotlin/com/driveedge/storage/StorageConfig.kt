@@ -1,12 +1,16 @@
 package com.driveedge.storage
 
-data class StorageConfig(
+data class StorageConfig
+  @JvmOverloads
+  constructor(
   val maxRetryCount: Int = 10,
   val defaultBatchSize: Int = 50,
   val retryBackoffPolicy: RetryBackoffPolicy = RetryBackoffPolicy(),
-)
+) 
 
-class RetryBackoffPolicy(
+class RetryBackoffPolicy
+  @JvmOverloads
+  constructor(
   private val scheduleMs: List<Long> = DEFAULT_SCHEDULE_MS,
   private val maxBackoffMs: Long = 120_000L,
 ) {

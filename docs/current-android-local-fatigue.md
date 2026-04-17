@@ -4,7 +4,7 @@
 - 项目：DriveEdge
 - 模块：`edge-app`
 - 版本：v0.3.0（当前仓库实现）
-- 日期：2026-04-16
+- 日期：2026-04-18
 - 适用对象：安卓端研发、算法研发、测试
 
 ## 2. 目标与范围
@@ -20,13 +20,16 @@
 7. 声音告警。
 8. 本地录制 MP4。
 9. 质检图片落盘。
+10. 原始风险事件上报到 `DriveServer /api/v1/events`。
+11. 弱网失败后本地排队重传。
+12. UI 展示事件上报状态。
 
 ### 2.2 当前不包含
 1. 云端推理主链。
-2. 事件上报、离线重试、补传闭环。
-3. Room 事件队列。
-4. WorkManager 上传任务。
-5. 头姿与复杂时序风险引擎。
+2. Room 事件队列。
+3. WorkManager 上传任务。
+4. 头姿与复杂时序风险引擎。
+5. 服务器端基于事件流自动产生日志/告警的完整消费链路。
 
 ## 3. 总体架构
 ```mermaid
@@ -37,8 +40,12 @@ flowchart LR
     jpeg --> face["YOLOv8Face ONNX 检脸"]
     jpeg --> mp["MediaPipe Face Landmarker"]
     face --> ui["UI 状态刷新"]
-    mp --> judge["闭眼/张嘴简版规则"]
+    mp --> judge["本地疲劳规则"]
     judge --> alert["Toast + 声音提醒"]
+    judge --> ingest["编码原始风险事件 + 本地入队"]
+    ingest --> retry["弱网退避重试"]
+    retry --> server["POST /api/v1/events"]
+    server --> uiNet["UI 显示上报状态"]
     jpeg --> dump["质检落盘"]
     cam --> record["MediaRecorder MP4 录制"]
 ```
@@ -56,7 +63,10 @@ flowchart LR
 5. 调用本地检测器与本地疲劳分析器。
 6. 更新 UI 状态。
 7. 触发疲劳告警时执行 Toast 和声音提醒。
-8. 提供录制与质检目录打开入口。
+8. 将触发的疲劳风险编码为 `EdgeEvent` 并异步上报服务器。
+9. 上传失败时进入本地队列，网络恢复后自动重试。
+10. UI 中展示事件上报状态。
+11. 提供录制与质检目录打开入口。
 
 ### 4.2 本地人脸检测：`LocalOnnxDetector`
 文件：`edge-app/src/main/java/com/driveedge/app/fatigue/LocalOnnxDetector.java`
@@ -98,7 +108,19 @@ flowchart LR
 1. 不依赖额外音频资源文件。
 2. 告警有节流，避免连续刷屏和连续狂响。
 
-### 4.5 录制与落盘
+### 4.5 事件上报与弱网补传
+当前上报链路：
+1. 本地判定 `drowsy=true` 后构造 `RiskEventCandidate`
+2. 经 `EventCenter` 生成 `EdgeEvent`
+3. 事件进入本地轻量持久化队列
+4. 立即尝试 `POST /api/v1/events`
+5. 失败后进入退避重试，网络恢复时继续补传
+
+说明：
+1. 当前接口是 `DriveServer /api/v1/events`
+2. UI 会展示事件上报结果
+
+### 4.6 录制与落盘
 当前支持：
 1. `MediaRecorder` 本地录制 MP4。
 2. 质检目录落盘 JPEG。
@@ -135,6 +157,11 @@ flowchart LR
 7. `打开录制目录` 按钮。
 8. `打开质检目录` 按钮。
 
+疲劳状态区当前会叠加展示：
+1. 本地推理 FPS、延时、检测框数量
+2. 疲劳告警状态与事件摘要
+3. 事件上报状态
+
 当前不再包含：
 1. 云端检测开关。
 2. Web 套壳入口。
@@ -149,6 +176,10 @@ flowchart LR
 ./gradlew :edge-app:assembleHostlocalDebug
 ./gradlew :edge-app:assembleSimulatorDebug
 ```
+
+联调建议：
+1. 根据联调环境选择合适的构建变体
+2. 服务器地址通过构建配置注入
 
 ### 7.2 输出目录
 1. `edge-app/build/outputs/apk/hostlocal/debug/`
@@ -169,12 +200,7 @@ Android/data/com.driveedge.app/files/recordings
 
 ## 8. 当前疲劳规则
 
-### 8.1 判定逻辑
-满足任一条件即进入疲劳警告：
-1. 连续闭眼达到阈值帧数。
-2. 连续张嘴达到阈值帧数。
-
-### 8.2 当前特点
+### 8.1 当前特点
 1. 实现简单，适合本地联调。
 2. 更偏工程验证，不是车规级疲劳模型。
 3. 当前主要目标是“先把端侧链路跑稳、跑通、可观测”。
@@ -183,7 +209,9 @@ Android/data/com.driveedge.app/files/recordings
 1. 当前疲劳规则较轻，误报和漏报仍需继续调。
 2. 暂未加入头姿检测、长时序平滑和风险等级融合。
 3. 当前声音提醒为系统音，不是自定义告警音。
-4. 旧文档中的云端、ForegroundService、CameraX 等内容属于历史方案，不再代表当前主实现。
+4. 当前补传队列使用轻量本地持久化实现，尚未升级为 Room + WorkManager。
+5. 当前事件上报状态主要用于联调，尚未做完整运营态 UI 设计。
+6. 旧文档中的云端、ForegroundService、CameraX 等内容属于历史方案，不再代表当前主实现。
 
 ## 10. 后续建议
 1. 增加头姿与低头检测。
