@@ -1,5 +1,15 @@
 package com.driveedge.uploader
 
+enum class UploadFailureCategory {
+  NONE,
+  NETWORK,
+  TIMEOUT,
+  SERVER,
+  CLIENT,
+  RESPONSE_PARSE,
+  UNKNOWN,
+}
+
 data class UploadReceipt(
   val eventId: String,
   val code: Int,
@@ -8,6 +18,7 @@ data class UploadReceipt(
   val httpStatus: Int?,
   val responseBody: String?,
   val transportError: String?,
+  val failureCategory: UploadFailureCategory = UploadFailureCategory.NONE,
 ) {
   val isTransportFailure: Boolean
     get() = transportError != null

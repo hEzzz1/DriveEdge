@@ -77,10 +77,12 @@ class StorageCenterTest {
     assertNotNull(row)
     assertEquals(UploadStatus.RETRY_WAIT, row.uploadStatus)
     assertEquals(1, row.retryCount)
-    assertEquals(7_000L, row.nextRetryAtMs)
+    assertTrue(row.nextRetryAtMs!! >= 7_000L)
+    assertEquals(UploadFailureClass.NONE, row.failureClass)
+    assertEquals(2_000L, row.lastAttemptAtMs)
 
-    assertTrue(center.pendingUploadQueue(nowMs = 6_999L).isEmpty())
-    assertEquals(1, center.pendingUploadQueue(nowMs = 7_000L).size)
+    assertTrue(center.pendingUploadQueue(nowMs = row.nextRetryAtMs!! - 1L).isEmpty())
+    assertEquals(1, center.pendingUploadQueue(nowMs = row.nextRetryAtMs!!).size)
   }
 
   @Test
@@ -127,6 +129,38 @@ class StorageCenterTest {
     assertEquals(UploadStatus.FAILED_FINAL, row.uploadStatus)
     assertEquals(2, row.retryCount)
     assertNull(row.nextRetryAtMs)
+  }
+
+  @Test
+  fun `onUploadResult persists failure class and deterministic jitter`() {
+    val center =
+      StorageCenter(
+        config =
+          StorageConfig(
+            retryBackoffPolicy = RetryBackoffPolicy(
+              scheduleMs = listOf(5_000L),
+              maxBackoffMs = 5_000L,
+              jitterUpperBoundMs = 500L,
+            ),
+          ),
+      )
+    center.onEdgeEvent(event(eventId = "evt-jitter", createdAtMs = 1_000L), nowMs = 1_000L)
+    center.claimUploadBatch(limit = 1, nowMs = 1_100L)
+
+    center.onUploadResult(
+      UploadAttemptResult(
+        eventId = "evt-jitter",
+        code = -1,
+        errorMessage = "timeout",
+        failureClass = UploadFailureClass.TIMEOUT,
+      ),
+      nowMs = 2_000L,
+    )
+
+    val row = center.getEventRow("evt-jitter")
+    assertNotNull(row)
+    assertEquals(UploadFailureClass.TIMEOUT, row.failureClass)
+    assertTrue(row.nextRetryAtMs!! in 7_000L..7_500L)
   }
 
   private fun event(

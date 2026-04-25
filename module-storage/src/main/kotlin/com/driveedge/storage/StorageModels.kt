@@ -3,6 +3,16 @@ package com.driveedge.storage
 import com.driveedge.event.center.EdgeEvent
 import com.driveedge.event.center.UploadStatus
 
+enum class UploadFailureClass {
+  NONE,
+  NETWORK,
+  TIMEOUT,
+  SERVER,
+  CLIENT,
+  RESPONSE_PARSE,
+  UNKNOWN,
+}
+
 data class EdgeEventRow(
   val event: EdgeEvent,
   val uploadStatus: UploadStatus = event.uploadStatus,
@@ -11,6 +21,8 @@ data class EdgeEventRow(
   val lastErrorMessage: String? = null,
   val serverTraceId: String? = null,
   val nextRetryAtMs: Long? = null,
+  val lastAttemptAtMs: Long? = null,
+  val failureClass: UploadFailureClass = UploadFailureClass.NONE,
   val updatedAtMs: Long = event.createdAtMs,
 ) {
   val eventId: String
@@ -34,6 +46,7 @@ data class UploadAttemptResult(
   val code: Int,
   val errorMessage: String? = null,
   val serverTraceId: String? = null,
+  val failureClass: UploadFailureClass = UploadFailureClass.NONE,
 )
 
 data class UploadQueueItem(
@@ -42,4 +55,6 @@ data class UploadQueueItem(
   val lastErrorCode: Int?,
   val lastErrorMessage: String?,
   val nextRetryAtMs: Long?,
+  val lastAttemptAtMs: Long?,
+  val failureClass: UploadFailureClass,
 )

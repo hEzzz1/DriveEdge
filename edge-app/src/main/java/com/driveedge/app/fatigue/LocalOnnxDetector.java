@@ -83,13 +83,13 @@ public final class LocalOnnxDetector implements AutoCloseable {
     long startedAt = System.currentTimeMillis();
     int originalWidth = bitmap.getWidth();
     int originalHeight = bitmap.getHeight();
-    float[] input = preprocessBitmap(bitmap);
+    PreprocessedBitmap preprocessed = preprocessBitmap(bitmap);
 
     long inferStartedAt = System.currentTimeMillis();
     try (
       OnnxTensor inputTensor = OnnxTensor.createTensor(
         environment,
-        FloatBuffer.wrap(input),
+        FloatBuffer.wrap(preprocessed.tensorChw),
         new long[] {1, 3, inputHeight, inputWidth}
       );
       OrtSession.Result output = session.run(Collections.singletonMap(inputName, inputTensor))
@@ -115,14 +115,12 @@ public final class LocalOnnxDetector implements AutoCloseable {
         }
       }
       List<Box> boxes = new ArrayList<>(kept.size());
-      float scaleX = originalWidth / (float) inputWidth;
-      float scaleY = originalHeight / (float) inputHeight;
       for (Detection detection : kept) {
         boxes.add(new Box(
-          clamp(detection.x1 * scaleX, 0f, originalWidth),
-          clamp(detection.y1 * scaleY, 0f, originalHeight),
-          clamp(detection.x2 * scaleX, 0f, originalWidth),
-          clamp(detection.y2 * scaleY, 0f, originalHeight),
+          clamp((detection.x1 - preprocessed.padX) / preprocessed.scale, 0f, originalWidth),
+          clamp((detection.y1 - preprocessed.padY) / preprocessed.scale, 0f, originalHeight),
+          clamp((detection.x2 - preprocessed.padX) / preprocessed.scale, 0f, originalWidth),
+          clamp((detection.y2 - preprocessed.padY) / preprocessed.scale, 0f, originalHeight),
           detection.score,
           detection.classId
         ));
@@ -158,32 +156,44 @@ public final class LocalOnnxDetector implements AutoCloseable {
   }
 
   @NonNull
-  private float[] preprocessBitmap(@NonNull Bitmap bitmap) {
+  private PreprocessedBitmap preprocessBitmap(@NonNull Bitmap bitmap) {
+    float scale = Math.min(
+      inputWidth / (float) bitmap.getWidth(),
+      inputHeight / (float) bitmap.getHeight()
+    );
+    int resizedWidth = Math.max(1, Math.round(bitmap.getWidth() * scale));
+    int resizedHeight = Math.max(1, Math.round(bitmap.getHeight() * scale));
+    int padX = (inputWidth - resizedWidth) / 2;
+    int padY = (inputHeight - resizedHeight) / 2;
+
     Bitmap scaled = bitmap;
-    if (bitmap.getWidth() != inputWidth || bitmap.getHeight() != inputHeight) {
-      scaled = Bitmap.createScaledBitmap(bitmap, inputWidth, inputHeight, true);
+    if (bitmap.getWidth() != resizedWidth || bitmap.getHeight() != resizedHeight) {
+      scaled = Bitmap.createScaledBitmap(bitmap, resizedWidth, resizedHeight, true);
     }
 
-    int pixelCount = inputWidth * inputHeight;
+    int pixelCount = resizedWidth * resizedHeight;
     int[] pixels = new int[pixelCount];
-    scaled.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight);
+    scaled.getPixels(pixels, 0, resizedWidth, 0, 0, resizedWidth, resizedHeight);
 
     if (scaled != bitmap) {
       scaled.recycle();
     }
 
-    float[] chw = new float[3 * pixelCount];
-    int planeSize = pixelCount;
+    int modelPixelCount = inputWidth * inputHeight;
+    float[] chw = new float[3 * modelPixelCount];
     for (int i = 0; i < pixelCount; i++) {
       int pixel = pixels[i];
+      int srcX = i % resizedWidth;
+      int srcY = i / resizedWidth;
+      int dstIndex = ((srcY + padY) * inputWidth) + srcX + padX;
       float r = ((pixel >> 16) & 0xFF) / 255.0f;
       float g = ((pixel >> 8) & 0xFF) / 255.0f;
       float b = (pixel & 0xFF) / 255.0f;
-      chw[i] = r;
-      chw[planeSize + i] = g;
-      chw[(planeSize * 2) + i] = b;
+      chw[dstIndex] = r;
+      chw[modelPixelCount + dstIndex] = g;
+      chw[(modelPixelCount * 2) + dstIndex] = b;
     }
-    return chw;
+    return new PreprocessedBitmap(chw, scale, padX, padY);
   }
 
   @NonNull
@@ -419,6 +429,21 @@ public final class LocalOnnxDetector implements AutoCloseable {
     DecodedOutput(@NonNull List<Detection> candidates, @NonNull String shapeText) {
       this.candidates = candidates;
       this.shapeText = shapeText;
+    }
+  }
+
+  private static final class PreprocessedBitmap {
+    @NonNull
+    final float[] tensorChw;
+    final float scale;
+    final int padX;
+    final int padY;
+
+    PreprocessedBitmap(@NonNull float[] tensorChw, float scale, int padX, int padY) {
+      this.tensorChw = tensorChw;
+      this.scale = scale;
+      this.padX = padX;
+      this.padY = padY;
     }
   }
 

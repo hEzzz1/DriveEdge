@@ -34,6 +34,9 @@ class EventUploaderTest {
 
     assertEquals("https://driveserver.local/api/v1/events", transport.lastEndpointUrl)
     assertEquals("token-001", transport.lastDeviceToken)
+    assertEquals("evt-1001", transport.lastEventId)
+    assertEquals("Idempotency-Key", transport.lastIdempotencyHeaderName)
+    assertEquals("X-Event-Id", transport.lastEventIdHeaderName)
     assertNotNull(transport.lastRequestBody)
     assertTrue(transport.lastRequestBody!!.contains("\"eventId\":\"evt-1001\""))
     assertTrue(transport.lastRequestBody!!.contains("\"eventTime\":\"2026-04-09T11:20:30Z\""))
@@ -42,6 +45,7 @@ class EventUploaderTest {
     assertEquals("ok", receipt.message)
     assertEquals(200, receipt.httpStatus)
     assertFalse(receipt.isTransportFailure)
+    assertEquals(UploadFailureCategory.NONE, receipt.failureCategory)
   }
 
   @Test
@@ -66,11 +70,19 @@ class EventUploaderTest {
     assertEquals("trace-missing-code", receipt.traceId)
     assertEquals(200, receipt.httpStatus)
     assertFalse(receipt.isTransportFailure)
+    assertEquals(UploadFailureCategory.RESPONSE_PARSE, receipt.failureCategory)
   }
 
   @Test
   fun `upload returns transport error receipt when network call throws`() {
-    val transport = RecordingTransport(nextError = IllegalStateException("socket timeout"))
+    val transport =
+      RecordingTransport(
+        nextError =
+          TransportException(
+            message = "socket timeout",
+            failureCategory = UploadFailureCategory.TIMEOUT,
+          ),
+      )
     val uploader =
       EventUploader(
         config =
@@ -89,6 +101,33 @@ class EventUploaderTest {
     assertNull(receipt.httpStatus)
     assertTrue(receipt.isTransportFailure)
     assertEquals("socket timeout", receipt.transportError)
+    assertEquals(UploadFailureCategory.TIMEOUT, receipt.failureCategory)
+  }
+
+  @Test
+  fun `upload marks client and server responses with failure category`() {
+    val clientTransport =
+      RecordingTransport(
+        nextResponse =
+          TransportResponse(
+            statusCode = 409,
+            body = """{"code":40901,"message":"conflict","traceId":"trace-client"}""",
+          ),
+      )
+    val serverTransport =
+      RecordingTransport(
+        nextResponse =
+          TransportResponse(
+            statusCode = 500,
+            body = """{"code":50001,"message":"busy","traceId":"trace-server"}""",
+          ),
+      )
+
+    val clientReceipt = EventUploader(UploaderConfig("https://driveserver.local", "token-001"), clientTransport).upload(sampleEvent())
+    val serverReceipt = EventUploader(UploaderConfig("https://driveserver.local", "token-001"), serverTransport).upload(sampleEvent())
+
+    assertEquals(UploadFailureCategory.CLIENT, clientReceipt.failureCategory)
+    assertEquals(UploadFailureCategory.SERVER, serverReceipt.failureCategory)
   }
 
   private fun sampleEvent(): EdgeEvent =
@@ -122,6 +161,12 @@ class EventUploaderTest {
       private set
     var lastDeviceToken: String? = null
       private set
+    var lastEventId: String? = null
+      private set
+    var lastIdempotencyHeaderName: String? = null
+      private set
+    var lastEventIdHeaderName: String? = null
+      private set
     var lastRequestBody: String? = null
       private set
     var lastTimeoutMs: Long? = null
@@ -130,11 +175,17 @@ class EventUploaderTest {
     override fun postEvent(
       endpointUrl: String,
       deviceToken: String,
+      eventId: String,
+      idempotencyHeaderName: String,
+      eventIdHeaderName: String,
       requestBody: String,
       timeout: Duration,
     ): TransportResponse {
       lastEndpointUrl = endpointUrl
       lastDeviceToken = deviceToken
+      lastEventId = eventId
+      lastIdempotencyHeaderName = idempotencyHeaderName
+      lastEventIdHeaderName = eventIdHeaderName
       lastRequestBody = requestBody
       lastTimeoutMs = timeout.toMillis()
 

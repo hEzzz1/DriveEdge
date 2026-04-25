@@ -56,8 +56,20 @@ import androidx.core.content.ContextCompat;
 import com.driveedge.app.R;
 import com.driveedge.app.camera.FrameData;
 import com.driveedge.app.event.EdgeEventReporter;
+import com.driveedge.app.fatigue.LocalDistractionAnalyzer;
+import com.driveedge.app.fatigue.LocalFaceSignalAnalyzer;
 import com.driveedge.app.fatigue.LocalFatigueAnalyzer;
 import com.driveedge.app.fatigue.LocalOnnxDetector;
+import com.driveedge.risk.engine.RiskEngine;
+import com.driveedge.risk.engine.RiskEngineConfig;
+import com.driveedge.risk.engine.RiskEventCandidate;
+import com.driveedge.risk.engine.RiskLevel;
+import com.driveedge.risk.engine.RiskType;
+import com.driveedge.risk.engine.TriggerReason;
+import com.driveedge.temporal.engine.FeatureWindow;
+import com.driveedge.temporal.engine.TemporalEngine;
+import com.driveedge.temporal.engine.TemporalEngineConfig;
+import com.driveedge.infer.yolo.DetectionResult;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -78,6 +90,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class MainActivity extends AppCompatActivity {
   private static final String TAG = "DriveEdgeMain";
   private static final long PREVIEW_UPLOAD_TICK_MS = 200L;
+  private static final long QUICK_FATIGUE_UI_HOLD_MS = 2_000L;
+  private static final long QUICK_FATIGUE_EVENT_CONFIRM_MS = 1_500L;
+  private static final long QUICK_FATIGUE_EVENT_COOLDOWN_MS = 8_000L;
   private static final long WAITING_STATUS_INTERVAL_MS = 1000L;
   private static final int ANALYSIS_TARGET_WIDTH = 1920;
   private static final int ANALYSIS_TARGET_HEIGHT = 1080;
@@ -91,6 +106,50 @@ public final class MainActivity extends AppCompatActivity {
   private static final String LOCAL_FATIGUE_MODEL_ASSET_PATH = "models/face_landmarker.task";
   private static final float LOCAL_CONF_THRESHOLD = 0.25f;
   private static final float LOCAL_NMS_THRESHOLD = 0.45f;
+  private static final float FACE_CROP_MARGIN_RATIO = 0.18f;
+  private static final int FATIGUE_MISSING_FACE_TOLERANCE_FRAMES = 2;
+  private static final int RISK_MISSING_FACE_TOLERANCE_FRAMES = 2;
+  @NonNull
+  private static final TemporalEngineConfig REALTIME_TEMPORAL_CONFIG =
+    new TemporalEngineConfig(
+      4_000L,
+      3,
+      2,
+      2,
+      0.65,
+      80L,
+      600L,
+      700L,
+      0.35f,
+      0.45,
+      0.42,
+      0.50,
+      1_000L,
+      1_000L
+    );
+  @NonNull
+  private static final RiskEngineConfig REALTIME_RISK_CONFIG =
+    new RiskEngineConfig(
+      new com.driveedge.risk.engine.FatigueWeights(),
+      new com.driveedge.risk.engine.DistractionWeights(),
+      0.24,
+      2_000L,
+      1,
+      30_000L,
+      1_500L,
+      0.50,
+      0.45,
+      1_000L,
+      0.42,
+      1_000L,
+      2,
+      2,
+      0.03,
+      0.08,
+      0.48,
+      0.65,
+      0.80
+    );
   private static final byte[] EMPTY_FRAME_BYTES = new byte[0];
   private static final String[] LOCAL_CLASS_NAMES = {"face"};
 
@@ -101,7 +160,6 @@ public final class MainActivity extends AppCompatActivity {
   private Button stopButton;
   private Button recordButton;
   private Button openRecordingsButton;
-  private Button openQualityReplayButton;
 
   @Nullable
   private CameraManager cameraManager;
@@ -152,11 +210,17 @@ public final class MainActivity extends AppCompatActivity {
   @Nullable
   private LocalOnnxDetector localOnnxDetector;
   @Nullable
+  private LocalFaceSignalAnalyzer localFaceSignalAnalyzer;
+  @Nullable
   private LocalFatigueAnalyzer localFatigueAnalyzer;
   @NonNull
   private final Object localOnnxDetectorLock = new Object();
   @NonNull
+  private final Object localFaceSignalAnalyzerLock = new Object();
+  @NonNull
   private final Object localFatigueAnalyzerLock = new Object();
+  @NonNull
+  private final LocalDistractionAnalyzer localDistractionAnalyzer = new LocalDistractionAnalyzer();
 
   private boolean captureStarted = false;
   private boolean previewUploadLoopRunning = false;
@@ -166,12 +230,25 @@ public final class MainActivity extends AppCompatActivity {
   private long lastProbeDumpMs = 0L;
   private long lastWaitingStatusMs = 0L;
   private long lastFatigueWarningToastMs = 0L;
+  private long lastDistractionWarningToastMs = 0L;
+  private long quickFatigueCandidateStartedElapsedMs = 0L;
+  private long lastQuickFatigueEventReportedElapsedMs = 0L;
+  private int realtimeRiskMissingFaceFrames = 0;
+  private long lastQuickFatigueDetectedElapsedMs = 0L;
+  @NonNull
+  private String lastQuickFatigueEventSummary = "fatigue_normal";
   @Nullable
   private ToneGenerator fatigueToneGenerator;
   @Nullable
   private EdgeEventReporter edgeEventReporter;
   @NonNull
   private volatile String edgeEventStatusLine = "事件上报：待触发";
+  @NonNull
+  private final TemporalEngine temporalEngine = new TemporalEngine(REALTIME_TEMPORAL_CONFIG);
+  @NonNull
+  private final RiskEngine riskEngine = new RiskEngine(REALTIME_RISK_CONFIG);
+  @Nullable
+  private volatile RiskEventCandidate latestRiskCandidate;
   @NonNull
   private String inferSessionId = "session-init";
   @NonNull
@@ -238,7 +315,6 @@ public final class MainActivity extends AppCompatActivity {
     stopButton = findViewById(R.id.stopButton);
     recordButton = findViewById(R.id.recordButton);
     openRecordingsButton = findViewById(R.id.openRecordingsButton);
-    openQualityReplayButton = findViewById(R.id.openQualityReplayButton);
 
     cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
 
@@ -247,7 +323,6 @@ public final class MainActivity extends AppCompatActivity {
     stopButton.setOnClickListener(v -> stopCapture());
     recordButton.setOnClickListener(v -> toggleRecording());
     openRecordingsButton.setOnClickListener(v -> openRecordingsDirectory());
-    openQualityReplayButton.setOnClickListener(v -> openQualityReplayDirectory());
 
     stopButton.setEnabled(false);
     recordButton.setEnabled(false);
@@ -265,6 +340,7 @@ public final class MainActivity extends AppCompatActivity {
   protected void onDestroy() {
     stopCapture();
     releaseLocalDetector();
+    releaseLocalFaceSignalAnalyzer();
     releaseLocalFatigueAnalyzer();
     releaseFatigueToneGenerator();
     releaseEdgeEventReporter();
@@ -285,6 +361,7 @@ public final class MainActivity extends AppCompatActivity {
       return;
     }
     captureStarted = true;
+    resetRealtimeRiskTracking();
     resetInferSession();
     statusView.setText(getString(R.string.status_connected));
     startButton.setEnabled(false);
@@ -309,6 +386,7 @@ public final class MainActivity extends AppCompatActivity {
     stopPreviewUploadLoop();
     secondFrameCounter.set(0);
     secondInferenceCounter.set(0);
+    resetRealtimeRiskTracking();
     statusView.setText(getString(R.string.status_stopped));
     fatigueStatusView.setText(getString(R.string.status_local_stopped));
     startButton.setEnabled(true);
@@ -852,20 +930,9 @@ public final class MainActivity extends AppCompatActivity {
       return null;
     }
 
-    LocalOnnxDetector detector;
-    try {
-      detector = getOrCreateLocalDetector();
-    } catch (Exception error) {
-      Log.w(TAG, "Local detector init failed", error);
-      return null;
-    }
-
     try {
       EncodedJpeg localFrame = encodeNormalizedNv21ToJpeg(yuvFrame, REPLAY_JPEG_QUALITY);
-      Bitmap modelBitmap = BitmapFactory.decodeByteArray(localFrame.jpeg, 0, localFrame.jpeg.length);
-      if (modelBitmap == null) {
-        return null;
-      }
+      Bitmap modelBitmap = createModelBitmapFromYuvFrame(yuvFrame);
       FrameData frame = new FrameData(
         localFrame.width,
         localFrame.height,
@@ -881,7 +948,7 @@ public final class MainActivity extends AppCompatActivity {
         "raw"
       );
     } catch (Exception error) {
-      Log.w(TAG, "Local frame encode/decode failed", error);
+      Log.w(TAG, "Local frame conversion failed", error);
       return null;
     }
   }
@@ -935,6 +1002,62 @@ public final class MainActivity extends AppCompatActivity {
       }
     }
     return nv21;
+  }
+
+  @NonNull
+  private Bitmap createModelBitmapFromYuvFrame(@NonNull YuvFrame frame) {
+    Bitmap bitmap = nv21ToBitmap(frame.nv21, frame.width, frame.height);
+    int rotationDegrees = computeStillFrameRotationDegrees();
+    if (rotationDegrees == 0) {
+      return bitmap;
+    }
+    Bitmap rotated = rotateBitmap(bitmap, rotationDegrees);
+    if (rotated != bitmap) {
+      bitmap.recycle();
+    }
+    return rotated;
+  }
+
+  @NonNull
+  private Bitmap nv21ToBitmap(@NonNull byte[] nv21, int width, int height) {
+    int frameSize = width * height;
+    int[] argb = new int[frameSize];
+    for (int y = 0; y < height; y++) {
+      int yRow = y * width;
+      int uvRow = frameSize + ((y >> 1) * width);
+      for (int x = 0; x < width; x++) {
+        int yValue = nv21[yRow + x] & 0xFF;
+        int uvIndex = uvRow + (x & ~1);
+        int vValue = (nv21[uvIndex] & 0xFF) - 128;
+        int uValue = (nv21[uvIndex + 1] & 0xFF) - 128;
+        int c = Math.max(0, yValue - 16);
+        int r = clampColor((298 * c + (409 * vValue) + 128) >> 8);
+        int g = clampColor((298 * c - (100 * uValue) - (208 * vValue) + 128) >> 8);
+        int b = clampColor((298 * c + (516 * uValue) + 128) >> 8);
+        argb[yRow + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+      }
+    }
+    return Bitmap.createBitmap(argb, width, height, Bitmap.Config.ARGB_8888);
+  }
+
+  private int clampColor(int value) {
+    if (value < 0) {
+      return 0;
+    }
+    if (value > 255) {
+      return 255;
+    }
+    return value;
+  }
+
+  @NonNull
+  private Bitmap rotateBitmap(@NonNull Bitmap source, int rotationDegrees) {
+    if (rotationDegrees == 0) {
+      return source;
+    }
+    Matrix matrix = new Matrix();
+    matrix.postRotate(rotationDegrees);
+    return Bitmap.createBitmap(source, 0, 0, source.getWidth(), source.getHeight(), matrix, true);
   }
 
   @NonNull
@@ -1052,11 +1175,22 @@ public final class MainActivity extends AppCompatActivity {
     Bitmap modelBitmap = uploadFrame.modelBitmap;
 
     inferExecutor.execute(() -> {
+      Bitmap analyzerBitmap = modelBitmap;
       try {
         LocalOnnxDetector detector = getOrCreateLocalDetector();
         LocalOnnxDetector.Result result = detector.inferBitmap(modelBitmap);
-        LocalFatigueAnalyzer.Result fatigue = getOrCreateLocalFatigueAnalyzer().analyzeBitmap(modelBitmap);
-        safeReportEdgeEvent(fatigue);
+        analyzerBitmap = cropBestFaceBitmap(modelBitmap, result);
+        LocalFaceSignalAnalyzer faceSignalAnalyzer = getOrCreateLocalFaceSignalAnalyzer();
+        LocalFaceSignalAnalyzer.Result faceSignals = faceSignalAnalyzer.analyzeBitmap(analyzerBitmap);
+        if (faceSignals.faces <= 0 && analyzerBitmap != modelBitmap) {
+          analyzerBitmap.recycle();
+          analyzerBitmap = modelBitmap;
+          faceSignals = faceSignalAnalyzer.analyzeBitmap(modelBitmap);
+        }
+        LocalFatigueAnalyzer.Result fatigue = getOrCreateLocalFatigueAnalyzer().analyze(faceSignals);
+        updateQuickFatigueUiState(fatigue);
+        RiskEventCandidate riskCandidate = updateRealtimeRisk(faceSignals, fatigue, uploadFrame.frame.timestampNs / 1_000_000L);
+        safeReportEdgeEvent(fatigue, riskCandidate);
         secondInferenceCounter.incrementAndGet();
         maybeDumpQualityReplay(uploadFrame, result);
         maybeSaveLocalRecognizedPhoto(uploadFrame, result);
@@ -1065,7 +1199,7 @@ public final class MainActivity extends AppCompatActivity {
         if (finishedAt - lastInferStatusUpdateMs >= 1000L) {
           int inferFps = secondInferenceCounter.getAndSet(0);
           lastInferStatusUpdateMs = finishedAt;
-          runOnUiThread(() -> renderLocalInferStatus(result, fatigue, inferFps));
+          runOnUiThread(() -> renderLocalInferStatus(result, fatigue, riskCandidate, inferFps));
         }
       } catch (Exception error) {
         Log.e(TAG, "Local ONNX infer failed", error);
@@ -1073,15 +1207,51 @@ public final class MainActivity extends AppCompatActivity {
           getString(R.string.status_local_error, formatError(error))
         ));
       } finally {
+        if (analyzerBitmap != modelBitmap) {
+          analyzerBitmap.recycle();
+        }
         modelBitmap.recycle();
         inferTaskRunning.set(false);
       }
     });
   }
 
+  @NonNull
+  private Bitmap cropBestFaceBitmap(
+    @NonNull Bitmap source,
+    @NonNull LocalOnnxDetector.Result result
+  ) {
+    LocalOnnxDetector.Box best = null;
+    for (LocalOnnxDetector.Box box : result.boxes) {
+      if (best == null || box.score > best.score) {
+        best = box;
+      }
+    }
+    if (best == null) {
+      return source;
+    }
+
+    float width = best.right - best.left;
+    float height = best.bottom - best.top;
+    if (width <= 1f || height <= 1f) {
+      return source;
+    }
+    float expandX = width * FACE_CROP_MARGIN_RATIO;
+    float expandY = height * FACE_CROP_MARGIN_RATIO;
+    int left = Math.max(0, Math.round(best.left - expandX));
+    int top = Math.max(0, Math.round(best.top - expandY));
+    int right = Math.min(source.getWidth(), Math.round(best.right + expandX));
+    int bottom = Math.min(source.getHeight(), Math.round(best.bottom + expandY));
+    if (right <= left || bottom <= top) {
+      return source;
+    }
+    return Bitmap.createBitmap(source, left, top, right - left, bottom - top);
+  }
+
   private void renderLocalInferStatus(
     @NonNull LocalOnnxDetector.Result result,
     @NonNull LocalFatigueAnalyzer.Result fatigue,
+    @Nullable RiskEventCandidate riskCandidate,
     int inferFps
   ) {
     String base = getString(
@@ -1093,32 +1263,118 @@ public final class MainActivity extends AppCompatActivity {
       result.maxScore,
       result.outputShape
     );
-    String warningLine = fatigue.drowsy
-      ? getString(R.string.status_fatigue_warning, fatigue.eventSummary)
-      : getString(R.string.status_fatigue_normal);
-    fatigueStatusView.setText(base + "\n" + warningLine + "\n" + fatigue.summaryText() + "\n" + edgeEventStatusLine);
-    maybeShowFatigueWarningToast(fatigue);
+    boolean quickFatigueActive = isQuickFatigueUiActive(fatigue);
+    String fatigueLine;
+    if (quickFatigueActive) {
+      fatigueLine = getString(R.string.status_fatigue_warning, resolveQuickFatigueSummary(fatigue));
+    } else if (riskCandidate != null && riskCandidate.getFatigueTriggered()) {
+      fatigueLine = getString(R.string.status_fatigue_warning, formatRiskCandidate(riskCandidate));
+    } else {
+      fatigueLine = getString(R.string.status_fatigue_normal);
+    }
+    String distractionLine = riskCandidate != null && riskCandidate.getDistractionTriggered()
+      ? getString(R.string.status_distraction_warning, formatRiskCandidate(riskCandidate))
+      : getString(R.string.status_distraction_normal);
+    fatigueStatusView.setText(
+      base
+        + "\n" + fatigueLine
+        + "\n" + distractionLine
+        + "\n" + fatigue.summaryText()
+        + "\n" + formatRiskScores(riskCandidate)
+        + "\n" + edgeEventStatusLine
+    );
+    maybeShowFatigueWarningToast(fatigue, riskCandidate);
+    maybeShowDistractionWarningToast(riskCandidate);
   }
 
-  private void maybeReportEdgeEvent(@NonNull LocalFatigueAnalyzer.Result fatigue) {
+  @Nullable
+  private RiskEventCandidate updateRealtimeRisk(
+    @NonNull LocalFaceSignalAnalyzer.Result faceSignals,
+    @NonNull LocalFatigueAnalyzer.Result fatigue,
+    long frameTimestampMs
+  ) {
+    if (faceSignals.faces <= 0) {
+      realtimeRiskMissingFaceFrames++;
+      if (realtimeRiskMissingFaceFrames > RISK_MISSING_FACE_TOLERANCE_FRAMES) {
+        temporalEngine.reset();
+        riskEngine.reset();
+        latestRiskCandidate = null;
+        return null;
+      }
+      return latestRiskCandidate;
+    }
+    realtimeRiskMissingFaceFrames = 0;
+
+    List<DetectionResult> detections = new ArrayList<>(8);
+    detections.add(new DetectionResult(
+      0,
+      fatigue.eyesClosed ? "eye_closed" : "eye_open",
+      fatigue.eyesClosed ? fatigue.eyeClosedScore : Math.max(0.5f, 1f - fatigue.eyeClosedScore),
+      new com.driveedge.infer.yolo.BoundingBox(0f, 0f, 1f, 1f),
+      frameTimestampMs
+    ));
+    if (fatigue.mouthOpenScore >= 0.30f) {
+      detections.add(new DetectionResult(
+        0,
+        "open_mouth",
+        fatigue.mouthOpenScore,
+        new com.driveedge.infer.yolo.BoundingBox(0f, 0f, 1f, 1f),
+        frameTimestampMs
+      ));
+    }
+    detections.addAll(localDistractionAnalyzer.toTemporalDetections(faceSignals, frameTimestampMs));
+    FeatureWindow featureWindow = temporalEngine.update(detections);
+    if (featureWindow == null) {
+      latestRiskCandidate = null;
+      return null;
+    }
+
+    RiskEventCandidate candidate = riskEngine.evaluate(featureWindow);
+    latestRiskCandidate = candidate;
+    return candidate;
+  }
+
+  private void maybeReportEdgeEvent(
+    @NonNull LocalFatigueAnalyzer.Result fatigue,
+    @Nullable RiskEventCandidate riskCandidate
+  ) {
     EdgeEventReporter reporter = edgeEventReporter;
     if (reporter == null) {
       return;
     }
-    reporter.reportFatigueResult(fatigue, System.currentTimeMillis());
+    if (riskCandidate != null && riskCandidate.getShouldTrigger()) {
+      reporter.reportRiskCandidate(riskCandidate);
+      lastQuickFatigueEventReportedElapsedMs = SystemClock.elapsedRealtime();
+      return;
+    }
+    if (shouldReportQuickFatigueFallback(fatigue)) {
+      reporter.reportFatigueResult(fatigue, System.currentTimeMillis());
+      lastQuickFatigueEventReportedElapsedMs = SystemClock.elapsedRealtime();
+    }
   }
 
-  private void safeReportEdgeEvent(@NonNull LocalFatigueAnalyzer.Result fatigue) {
+  private void safeReportEdgeEvent(
+    @NonNull LocalFatigueAnalyzer.Result fatigue,
+    @Nullable RiskEventCandidate riskCandidate
+  ) {
     try {
-      maybeReportEdgeEvent(fatigue);
+      maybeReportEdgeEvent(fatigue, riskCandidate);
     } catch (Exception error) {
       Log.e(TAG, "Edge event reporting failed", error);
       edgeEventStatusLine = "事件上报：异常 " + error.getClass().getSimpleName();
     }
   }
 
-  private void maybeShowFatigueWarningToast(@NonNull LocalFatigueAnalyzer.Result fatigue) {
-    if (!fatigue.drowsy) {
+  private void maybeShowFatigueWarningToast(
+    @NonNull LocalFatigueAnalyzer.Result fatigue,
+    @Nullable RiskEventCandidate riskCandidate
+  ) {
+    String warningText;
+    if (isQuickFatigueUiActive(fatigue)) {
+      warningText = resolveQuickFatigueSummary(fatigue);
+    } else if (riskCandidate != null && riskCandidate.getFatigueTriggered()) {
+      warningText = formatRiskCandidate(riskCandidate);
+    } else {
       return;
     }
     long now = SystemClock.elapsedRealtime();
@@ -1128,10 +1384,80 @@ public final class MainActivity extends AppCompatActivity {
     lastFatigueWarningToastMs = now;
     Toast.makeText(
       this,
-      getString(R.string.toast_fatigue_warning, fatigue.eventSummary),
+      getString(R.string.toast_fatigue_warning, warningText),
       Toast.LENGTH_SHORT
     ).show();
     playFatigueWarningTone();
+  }
+
+  private void maybeShowDistractionWarningToast(@Nullable RiskEventCandidate riskCandidate) {
+    if (riskCandidate == null || !riskCandidate.getDistractionTriggered()) {
+      return;
+    }
+    long now = SystemClock.elapsedRealtime();
+    if (now - lastDistractionWarningToastMs < 3000L) {
+      return;
+    }
+    lastDistractionWarningToastMs = now;
+    Toast.makeText(
+      this,
+      getString(R.string.toast_distraction_warning, formatRiskCandidate(riskCandidate)),
+      Toast.LENGTH_SHORT
+    ).show();
+    playFatigueWarningTone();
+  }
+
+  @NonNull
+  private String formatRiskCandidate(@NonNull RiskEventCandidate candidate) {
+    String type =
+      candidate.getDominantRiskType() == RiskType.DISTRACTION ? "DISTRACTION" :
+        candidate.getDominantRiskType() == RiskType.FATIGUE ? "FATIGUE" : "NONE";
+    return candidate.getRiskLevel().name() + " " + type + " " + formatTriggerReasons(candidate);
+  }
+
+  @NonNull
+  private String formatRiskScores(@Nullable RiskEventCandidate candidate) {
+    if (candidate == null) {
+      return "risk=fatigue 0.00 distraction 0.00 level=NONE";
+    }
+    return String.format(
+      Locale.US,
+      "risk=fatigue %.2f distraction %.2f level=%s",
+      candidate.getFatigueScore(),
+      candidate.getDistractionScore(),
+      candidate.getRiskLevel().name()
+    );
+  }
+
+  @NonNull
+  private String formatTriggerReasons(@NonNull RiskEventCandidate candidate) {
+    if (candidate.getTriggerReasons().isEmpty()) {
+      return "stable";
+    }
+    List<String> labels = new ArrayList<>();
+    for (TriggerReason reason : candidate.getTriggerReasons()) {
+      switch (reason) {
+        case DISTRACTION_HEAD_OFF_ROAD_SUSTAINED:
+          labels.add("off_road");
+          break;
+        case DISTRACTION_HEAD_DOWN_SUSTAINED:
+          labels.add("head_down");
+          break;
+        case DISTRACTION_GAZE_OFFSET_SUSTAINED:
+          labels.add("gaze_offset");
+          break;
+        case FATIGUE_PERCLOS_SUSTAINED:
+          labels.add("perclos");
+          break;
+        case FATIGUE_YAWN_FREQUENT:
+          labels.add("yawn");
+          break;
+        default:
+          labels.add(reason.name().toLowerCase(Locale.US));
+          break;
+      }
+    }
+    return labels.toString();
   }
 
   private void playFatigueWarningTone() {
@@ -1376,6 +1702,66 @@ public final class MainActivity extends AppCompatActivity {
     updateInferIdleStatus();
   }
 
+  private void resetRealtimeRiskTracking() {
+    temporalEngine.reset();
+    riskEngine.reset();
+    latestRiskCandidate = null;
+    realtimeRiskMissingFaceFrames = 0;
+    lastDistractionWarningToastMs = 0L;
+    lastFatigueWarningToastMs = 0L;
+    quickFatigueCandidateStartedElapsedMs = 0L;
+    lastQuickFatigueEventReportedElapsedMs = 0L;
+    lastQuickFatigueDetectedElapsedMs = 0L;
+    lastQuickFatigueEventSummary = "fatigue_normal";
+  }
+
+  private void updateQuickFatigueUiState(@NonNull LocalFatigueAnalyzer.Result fatigue) {
+    if (!fatigue.drowsy) {
+      return;
+    }
+    long now = SystemClock.elapsedRealtime();
+    if (quickFatigueCandidateStartedElapsedMs <= 0L) {
+      quickFatigueCandidateStartedElapsedMs = now;
+    }
+    lastQuickFatigueDetectedElapsedMs = now;
+    lastQuickFatigueEventSummary = fatigue.eventSummary;
+  }
+
+  private boolean isQuickFatigueUiActive(@NonNull LocalFatigueAnalyzer.Result fatigue) {
+    if (fatigue.drowsy) {
+      return true;
+    }
+    long lastDetectedAt = lastQuickFatigueDetectedElapsedMs;
+    if (lastDetectedAt <= 0L) {
+      return false;
+    }
+    return SystemClock.elapsedRealtime() - lastDetectedAt <= QUICK_FATIGUE_UI_HOLD_MS;
+  }
+
+  @NonNull
+  private String resolveQuickFatigueSummary(@NonNull LocalFatigueAnalyzer.Result fatigue) {
+    if (fatigue.drowsy) {
+      return fatigue.eventSummary;
+    }
+    return lastQuickFatigueEventSummary;
+  }
+
+  private boolean shouldReportQuickFatigueFallback(@NonNull LocalFatigueAnalyzer.Result fatigue) {
+    long now = SystemClock.elapsedRealtime();
+    if (!isQuickFatigueUiActive(fatigue)) {
+      quickFatigueCandidateStartedElapsedMs = 0L;
+      return false;
+    }
+    if (quickFatigueCandidateStartedElapsedMs <= 0L) {
+      quickFatigueCandidateStartedElapsedMs = now;
+      return false;
+    }
+    if (now - quickFatigueCandidateStartedElapsedMs < QUICK_FATIGUE_EVENT_CONFIRM_MS) {
+      return false;
+    }
+    return now - lastQuickFatigueEventReportedElapsedMs >= QUICK_FATIGUE_EVENT_COOLDOWN_MS;
+  }
+
   private void updateInferIdleStatus() {
     fatigueStatusView.setText(getString(
       R.string.status_local_idle,
@@ -1390,7 +1776,7 @@ public final class MainActivity extends AppCompatActivity {
       return;
     }
     lastWaitingStatusMs = now;
-    fatigueStatusView.setText("本地疲劳检测：等待相机帧");
+    fatigueStatusView.setText("本地疲劳快检：等待相机帧");
   }
 
   @NonNull
@@ -1428,9 +1814,32 @@ public final class MainActivity extends AppCompatActivity {
       if (analyzer != null) {
         return analyzer;
       }
-      analyzer = new LocalFatigueAnalyzer(getApplicationContext(), LOCAL_FATIGUE_MODEL_ASSET_PATH);
+      analyzer = new LocalFatigueAnalyzer(FATIGUE_MISSING_FACE_TOLERANCE_FRAMES);
       localFatigueAnalyzer = analyzer;
       return analyzer;
+    }
+  }
+
+  @NonNull
+  private LocalFaceSignalAnalyzer getOrCreateLocalFaceSignalAnalyzer() {
+    synchronized (localFaceSignalAnalyzerLock) {
+      LocalFaceSignalAnalyzer analyzer = localFaceSignalAnalyzer;
+      if (analyzer != null) {
+        return analyzer;
+      }
+      analyzer = new LocalFaceSignalAnalyzer(getApplicationContext(), LOCAL_FATIGUE_MODEL_ASSET_PATH);
+      localFaceSignalAnalyzer = analyzer;
+      return analyzer;
+    }
+  }
+
+  private void releaseLocalFaceSignalAnalyzer() {
+    synchronized (localFaceSignalAnalyzerLock) {
+      LocalFaceSignalAnalyzer analyzer = localFaceSignalAnalyzer;
+      localFaceSignalAnalyzer = null;
+      if (analyzer != null) {
+        analyzer.close();
+      }
     }
   }
 
@@ -1615,12 +2024,6 @@ public final class MainActivity extends AppCompatActivity {
 
   private void openRecordingsDirectory() {
     openExternalFilesSubDirectory("recordings", recordingsDir());
-  }
-
-  private void openQualityReplayDirectory() {
-    File replayDir = qualityReplayDir();
-    Toast.makeText(this, "质检目录: " + replayDir.getAbsolutePath(), Toast.LENGTH_LONG).show();
-    openExternalFilesSubDirectory("quality_replay", replayDir);
   }
 
   private void openExternalFilesSubDirectory(@NonNull String subdir, @NonNull File fallbackDir) {

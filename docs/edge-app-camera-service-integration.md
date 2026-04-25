@@ -122,8 +122,8 @@ android.useAndroidX=true
 - `edge-app/build/outputs/apk/simulator/debug/edge-app-simulator-debug.apk`
 
 `Build Variant` 说明：
-1. `simulatorDebug`：`baseUrl = http://10.0.2.2:8080`（Android 模拟器访问宿主机）。
-2. `hostlocalDebug`：`baseUrl = http://127.0.0.1:8080`（本机 JVM 侧调试）。
+1. `simulatorDebug`：`baseUrl = http://<nginx-proxy-host>`（当前通过 Nginx 代理访问联调服务）。
+2. `hostlocalDebug`：`baseUrl = http://<nginx-proxy-host>`（当前通过 Nginx 代理访问联调服务）。
 
 ### 5.3 模拟器联调步骤（推荐）
 1. `adb devices` 确认设备在线。

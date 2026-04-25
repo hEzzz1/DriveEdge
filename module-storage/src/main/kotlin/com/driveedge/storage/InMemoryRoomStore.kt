@@ -39,7 +39,14 @@ class InMemoryRoomStore : EdgeEventDao, DeviceConfigDao {
     return edgeEvents.values
       .asSequence()
       .filter { isReadyForUpload(it, nowMs) }
-      .sortedBy { it.event.createdAtMs }
+      .sortedWith(
+        compareBy<EdgeEventRow>(
+          { priorityOf(it) },
+          { it.nextRetryAtMs ?: Long.MIN_VALUE },
+          { it.lastAttemptAtMs ?: Long.MIN_VALUE },
+          { it.event.createdAtMs },
+        ),
+      )
       .take(limit)
       .toList()
   }
@@ -63,5 +70,12 @@ class InMemoryRoomStore : EdgeEventDao, DeviceConfigDao {
       UploadStatus.SUCCESS,
       UploadStatus.FAILED_FINAL,
       -> false
+    }
+
+  private fun priorityOf(row: EdgeEventRow): Int =
+    when (row.uploadStatus) {
+      UploadStatus.RETRY_WAIT -> 0
+      UploadStatus.PENDING -> 1
+      else -> 2
     }
 }

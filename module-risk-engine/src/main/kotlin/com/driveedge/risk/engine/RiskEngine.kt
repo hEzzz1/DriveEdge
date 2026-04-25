@@ -3,14 +3,22 @@ package com.driveedge.risk.engine
 import com.driveedge.temporal.engine.FeatureWindow
 import com.driveedge.temporal.engine.HeadPose
 import kotlin.math.max
+import kotlin.jvm.JvmOverloads
 
-class RiskEngine(
+class RiskEngine @JvmOverloads constructor(
   private val config: RiskEngineConfig = RiskEngineConfig(),
 ) {
+  private var triggerStreak: Int = 0
+  private var clearStreak: Int = 0
+  private var latchedRiskLevel: RiskLevel = RiskLevel.NONE
+  private var latchedDominantRiskType: RiskType? = null
+  private var latchedTriggerReasons: Set<TriggerReason> = emptySet()
+
   fun evaluate(featureWindow: FeatureWindow): RiskEventCandidate {
     val fatigueScore = computeFatigueScore(featureWindow)
     val distractionScore = computeDistractionScore(featureWindow)
-    val baseRiskLevel = toRiskLevel(max(fatigueScore, distractionScore))
+    val rawScore = max(fatigueScore, distractionScore)
+    val baseRiskLevel = toRiskLevel(rawScore)
 
     val triggerReasons = linkedSetOf<TriggerReason>()
 
@@ -28,15 +36,36 @@ class RiskEngine(
     if (distractionHeadPoseTriggered) {
       triggerReasons += TriggerReason.DISTRACTION_HEAD_OFF_ROAD_SUSTAINED
     }
+    val distractionHeadDownTriggered = isDistractionHeadDownTriggered(featureWindow)
+    if (distractionHeadDownTriggered) {
+      triggerReasons += TriggerReason.DISTRACTION_HEAD_DOWN_SUSTAINED
+    }
+    val distractionGazeOffsetTriggered = isDistractionGazeOffsetTriggered(featureWindow)
+    if (distractionGazeOffsetTriggered) {
+      triggerReasons += TriggerReason.DISTRACTION_GAZE_OFFSET_SUSTAINED
+    }
 
     val fatigueTriggered = fatiguePerclosTriggered || fatigueYawnTriggered
-    val distractionTriggered = distractionHeadPoseTriggered
-    val shouldTrigger = fatigueTriggered || distractionTriggered
-    val riskLevel =
-      if (shouldTrigger && baseRiskLevel == RiskLevel.NONE) {
-        RiskLevel.LOW
-      } else {
-        baseRiskLevel
+    val distractionTriggered =
+      distractionHeadPoseTriggered || distractionHeadDownTriggered || distractionGazeOffsetTriggered
+    val rawShouldTrigger = fatigueTriggered || distractionTriggered
+    val rawDominantRiskType = dominantRiskType(fatigueScore, distractionScore)
+    val shouldTrigger = stabilizeTriggerState(rawShouldTrigger, rawScore)
+    val riskLevel = stabilizeRiskLevel(shouldTrigger, baseRiskLevel, rawScore, rawDominantRiskType)
+    val dominantRiskType =
+      when {
+        rawShouldTrigger -> rawDominantRiskType
+        shouldTrigger -> latchedDominantRiskType
+        else -> null
+      }
+    val stabilizedReasons =
+      when {
+        rawShouldTrigger -> {
+          latchedTriggerReasons = triggerReasons
+          triggerReasons
+        }
+        shouldTrigger -> latchedTriggerReasons
+        else -> emptySet()
       }
 
     return RiskEventCandidate(
@@ -45,12 +74,20 @@ class RiskEngine(
       fatigueScore = fatigueScore,
       distractionScore = distractionScore,
       riskLevel = riskLevel,
-      dominantRiskType = dominantRiskType(fatigueScore, distractionScore),
+      dominantRiskType = dominantRiskType,
       fatigueTriggered = fatigueTriggered,
       distractionTriggered = distractionTriggered,
       shouldTrigger = shouldTrigger,
-      triggerReasons = triggerReasons,
+      triggerReasons = stabilizedReasons,
     )
+  }
+
+  fun reset() {
+    triggerStreak = 0
+    clearStreak = 0
+    latchedRiskLevel = RiskLevel.NONE
+    latchedDominantRiskType = null
+    latchedTriggerReasons = emptySet()
   }
 
   private fun dominantRiskType(
@@ -73,7 +110,16 @@ class RiskEngine(
 
   private fun isDistractionHeadPoseTriggered(featureWindow: FeatureWindow): Boolean =
     featureWindow.headPose in OFF_ROAD_POSES &&
-      featureWindow.windowDurationMs >= config.distractionHeadPoseDurationMs
+      featureWindow.windowDurationMs >= config.distractionHeadPoseDurationMs &&
+      featureWindow.headPoseStability >= config.distractionHeadPoseStabilityThreshold
+
+  private fun isDistractionHeadDownTriggered(featureWindow: FeatureWindow): Boolean =
+    featureWindow.headPitch >= config.distractionHeadDownThreshold &&
+      featureWindow.headDownDurationMs >= config.distractionHeadDownDurationMs
+
+  private fun isDistractionGazeOffsetTriggered(featureWindow: FeatureWindow): Boolean =
+    featureWindow.gazeOffset >= config.distractionGazeOffsetThreshold &&
+      featureWindow.gazeOffsetDurationMs >= config.distractionGazeOffsetDurationMs
 
   private fun computeFatigueScore(featureWindow: FeatureWindow): Double {
     val durationFactor = ratio(
@@ -100,17 +146,30 @@ class RiskEngine(
   }
 
   private fun computeDistractionScore(featureWindow: FeatureWindow): Double {
-    val durationFactor = ratio(
+    val offRoadDurationFactor = ratio(
       featureWindow.windowDurationMs.toDouble(),
       config.distractionHeadPoseDurationMs.toDouble(),
     )
-    val offRoadSignal = if (featureWindow.headPose in OFF_ROAD_POSES) 1.0 else 0.0
-    val unknownSignal = if (featureWindow.headPose == HeadPose.UNKNOWN) 1.0 else 0.0
+    val offRoadSignal =
+      if (featureWindow.headPose in OFF_ROAD_POSES) {
+        ratio(featureWindow.headPoseStability, config.distractionHeadPoseStabilityThreshold)
+      } else {
+        0.0
+      }
+    val headDownSignal =
+      ratio(featureWindow.headPitch, config.distractionHeadDownThreshold) *
+        ratio(featureWindow.headDownDurationMs.toDouble(), config.distractionHeadDownDurationMs.toDouble())
+    val gazeOffsetSignal =
+      ratio(featureWindow.gazeOffset, config.distractionGazeOffsetThreshold) *
+        ratio(featureWindow.gazeOffsetDurationMs.toDouble(), config.distractionGazeOffsetDurationMs.toDouble())
+    val unknownSignal = if (featureWindow.headPose == HeadPose.UNKNOWN) offRoadDurationFactor else 0.0
 
     return weightedAverage(
       values = listOf(
-        (offRoadSignal * durationFactor) to config.distractionWeights.offRoadWeight,
-        (unknownSignal * durationFactor) to config.distractionWeights.unknownPoseWeight,
+        (offRoadSignal * offRoadDurationFactor) to config.distractionWeights.offRoadWeight,
+        headDownSignal to config.distractionWeights.headDownWeight,
+        gazeOffsetSignal to config.distractionWeights.gazeOffsetWeight,
+        unknownSignal to config.distractionWeights.unknownPoseWeight,
       ),
     )
   }
@@ -121,6 +180,79 @@ class RiskEngine(
       score >= config.mediumRiskThreshold -> RiskLevel.MEDIUM
       score >= config.lowRiskThreshold -> RiskLevel.LOW
       else -> RiskLevel.NONE
+    }
+
+  private fun stabilizeTriggerState(
+    rawShouldTrigger: Boolean,
+    rawScore: Double,
+  ): Boolean {
+    val keepTriggered =
+      latchedRiskLevel != RiskLevel.NONE && rawScore >= (config.lowRiskThreshold - config.clearHysteresisDelta)
+    val effectivePositive = rawShouldTrigger || keepTriggered
+
+    if (effectivePositive) {
+      triggerStreak += 1
+      clearStreak = 0
+      if (latchedRiskLevel == RiskLevel.NONE && triggerStreak >= config.triggerConfirmCount) {
+        latchedRiskLevel = RiskLevel.LOW
+      }
+    } else {
+      clearStreak += 1
+      triggerStreak = 0
+      if (latchedRiskLevel != RiskLevel.NONE && clearStreak >= config.clearConfirmCount) {
+        latchedRiskLevel = RiskLevel.NONE
+        latchedDominantRiskType = null
+        latchedTriggerReasons = emptySet()
+      }
+    }
+
+    return latchedRiskLevel != RiskLevel.NONE
+  }
+
+  private fun stabilizeRiskLevel(
+    shouldTrigger: Boolean,
+    rawRiskLevel: RiskLevel,
+    rawScore: Double,
+    rawDominantRiskType: RiskType?,
+  ): RiskLevel {
+    if (!shouldTrigger) {
+      latchedRiskLevel = RiskLevel.NONE
+      return RiskLevel.NONE
+    }
+
+    var level = if (latchedRiskLevel == RiskLevel.NONE) RiskLevel.LOW else latchedRiskLevel
+    val targetLevel = if (rawRiskLevel == RiskLevel.NONE) RiskLevel.LOW else rawRiskLevel
+
+    while (level.ordinal < targetLevel.ordinal) {
+      val next = RiskLevel.entries[level.ordinal + 1]
+      if (rawScore >= thresholdOf(next) + config.triggerHysteresisDelta) {
+        level = next
+      } else {
+        break
+      }
+    }
+
+    while (level.ordinal > targetLevel.ordinal) {
+      if (rawScore <= thresholdOf(level) - config.clearHysteresisDelta) {
+        level = RiskLevel.entries[level.ordinal - 1]
+      } else {
+        break
+      }
+    }
+
+    latchedRiskLevel = level
+    if (level != RiskLevel.NONE && rawDominantRiskType != null) {
+      latchedDominantRiskType = rawDominantRiskType
+    }
+    return level
+  }
+
+  private fun thresholdOf(level: RiskLevel): Double =
+    when (level) {
+      RiskLevel.NONE -> 0.0
+      RiskLevel.LOW -> config.lowRiskThreshold
+      RiskLevel.MEDIUM -> config.mediumRiskThreshold
+      RiskLevel.HIGH -> config.highRiskThreshold
     }
 
   private fun weightedAverage(values: List<Pair<Double, Double>>): Double {

@@ -24,6 +24,7 @@ class StorageCenter(
       EdgeEventRow(
         event = event.copy(uploadStatus = UploadStatus.PENDING),
         uploadStatus = UploadStatus.PENDING,
+        failureClass = UploadFailureClass.NONE,
         updatedAtMs = nowMs,
       )
     edgeEventDao.upsert(row)
@@ -55,6 +56,7 @@ class StorageCenter(
         row.copy(
           uploadStatus = UploadStatus.SENDING,
           nextRetryAtMs = null,
+          lastAttemptAtMs = nowMs,
           updatedAtMs = nowMs,
         )
       edgeEventDao.update(claimed)
@@ -80,6 +82,8 @@ class StorageCenter(
             lastErrorMessage = null,
             serverTraceId = result.serverTraceId ?: current.serverTraceId,
             nextRetryAtMs = null,
+            lastAttemptAtMs = nowMs,
+            failureClass = UploadFailureClass.NONE,
             updatedAtMs = nowMs,
           )
         }
@@ -91,6 +95,8 @@ class StorageCenter(
             lastErrorMessage = result.errorMessage,
             serverTraceId = result.serverTraceId ?: current.serverTraceId,
             nextRetryAtMs = null,
+            lastAttemptAtMs = nowMs,
+            failureClass = result.failureClass,
             updatedAtMs = nowMs,
           )
         }
@@ -118,10 +124,12 @@ class StorageCenter(
         lastErrorMessage = result.errorMessage ?: "Retry limit exceeded",
         serverTraceId = result.serverTraceId ?: current.serverTraceId,
         nextRetryAtMs = null,
+        lastAttemptAtMs = nowMs,
+        failureClass = result.failureClass,
         updatedAtMs = nowMs,
       )
     }
-    val delayMs = config.retryBackoffPolicy.delayMsForAttempt(nextRetryCount)
+    val delayMs = config.retryBackoffPolicy.delayMsForAttempt(nextRetryCount, current.eventId)
     return current.copy(
       uploadStatus = UploadStatus.RETRY_WAIT,
       retryCount = nextRetryCount,
@@ -129,6 +137,8 @@ class StorageCenter(
       lastErrorMessage = result.errorMessage,
       serverTraceId = result.serverTraceId ?: current.serverTraceId,
       nextRetryAtMs = nowMs + delayMs,
+      lastAttemptAtMs = nowMs,
+      failureClass = result.failureClass,
       updatedAtMs = nowMs,
     )
   }
@@ -140,6 +150,8 @@ class StorageCenter(
       lastErrorCode = lastErrorCode,
       lastErrorMessage = lastErrorMessage,
       nextRetryAtMs = nextRetryAtMs,
+      lastAttemptAtMs = lastAttemptAtMs,
+      failureClass = failureClass,
     )
 
   private companion object {

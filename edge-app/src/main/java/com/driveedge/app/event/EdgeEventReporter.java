@@ -26,6 +26,7 @@ import com.driveedge.storage.EdgeEventDao;
 import com.driveedge.storage.EdgeEventRow;
 import com.driveedge.storage.StorageCenter;
 import com.driveedge.storage.StorageConfig;
+import com.driveedge.storage.UploadFailureClass;
 import com.driveedge.storage.UploadAttemptResult;
 import com.driveedge.storage.UploadQueueItem;
 import com.driveedge.uploader.EventUploader;
@@ -44,6 +45,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -54,9 +56,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class EdgeEventReporter implements AutoCloseable {
   private static final int MAX_PENDING_SCAN = 512;
   private static final int UPLOAD_BATCH_SIZE = 8;
+  private static final int MAX_UPLOAD_BATCH_SIZE = 24;
 
   @NonNull
-  private final PrefsQueueStore queueStore;
+  private final Context appContext;
+  @NonNull
+  private final ReporterQueueStore queueStore;
   @NonNull
   private final StorageCenter storageCenter;
   @NonNull
@@ -64,13 +69,15 @@ public final class EdgeEventReporter implements AutoCloseable {
   @NonNull
   private final EventUploader eventUploader;
   @NonNull
-  private final ExecutorService uploadExecutor = Executors.newSingleThreadExecutor();
+  private final ExecutorService uploadExecutor;
   @NonNull
-  private final ScheduledExecutorService retryScheduler = Executors.newSingleThreadScheduledExecutor();
+  private final ScheduledExecutorService retryScheduler;
   @NonNull
   private final AtomicBoolean uploadLoopRunning = new AtomicBoolean(false);
   @NonNull
   private final StatusListener statusListener;
+  @NonNull
+  private final BooleanSupplier networkChecker;
   @Nullable
   private final ConnectivityManager connectivityManager;
   @Nullable
@@ -79,22 +86,22 @@ public final class EdgeEventReporter implements AutoCloseable {
   private ScheduledFuture<?> retryFuture;
   private long scheduledRetryAtMs = Long.MAX_VALUE;
   private volatile boolean closed = false;
+  private final boolean directUploadMode;
   @NonNull
   private volatile String lastStatusLine = "事件上报：待触发";
 
   public EdgeEventReporter(@NonNull Context context, @NonNull StatusListener statusListener) {
-    this.statusListener = statusListener;
-    PrefsQueueStore store;
+    Context appContext = context.getApplicationContext();
+    ReporterQueueStore store;
     try {
-      store = new PrefsQueueStore(context.getApplicationContext());
+      store = createQueueStore(appContext);
     } catch (Exception error) {
       store = new PrefsQueueStore();
       updateStatus("事件上报：本地队列初始化失败，已切换内存队列");
     }
-    this.queueStore = store;
-    this.storageCenter = new StorageCenter(queueStore, queueStore, new StorageConfig(), Clock.systemUTC());
+    StorageCenter storageCenter = new StorageCenter(store, store, new StorageConfig(), Clock.systemUTC());
     EdgeEventStore eventStore = event -> storageCenter.onEdgeEvent(event, System.currentTimeMillis());
-    this.eventCenter = new EventCenter(
+    EventCenter eventCenter = new EventCenter(
       new EventCenterConfig(
         BuildConfig.EDGE_VEHICLE_ID,
         BuildConfig.EDGE_FLEET_ID,
@@ -104,39 +111,72 @@ public final class EdgeEventReporter implements AutoCloseable {
       ),
       eventStore
     );
-    this.eventUploader = new EventUploader(
+    EventUploader eventUploader = new EventUploader(
       new UploaderConfig(
         BuildConfig.EDGE_SERVER_BASE_URL,
         BuildConfig.EDGE_DEVICE_TOKEN,
         "/api/v1/events",
+        "Idempotency-Key",
+        "X-Event-Id",
         Duration.ofSeconds(5),
         Duration.ofSeconds(8)
       )
     );
 
     ConnectivityManager manager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
-    connectivityManager = manager;
+    ConnectivityManager.NetworkCallback callback = null;
     if (manager != null) {
-      ConnectivityManager.NetworkCallback callback =
+      callback =
         new ConnectivityManager.NetworkCallback() {
           @Override
           public void onAvailable(@NonNull Network network) {
-            if (!closed) {
-              updateStatus("事件上报：网络恢复，开始重试");
-              pumpUploads();
-            }
+            handleNetworkAvailable();
           }
         };
-      networkCallback = callback;
       try {
         manager.registerDefaultNetworkCallback(callback);
       } catch (Exception ignored) {
         updateStatus("事件上报：网络监听不可用，改为定时重试");
       }
-    } else {
-      networkCallback = null;
     }
+    this.appContext = appContext;
+    this.queueStore = store;
+    this.storageCenter = storageCenter;
+    this.eventCenter = eventCenter;
+    this.eventUploader = eventUploader;
+    this.uploadExecutor = Executors.newSingleThreadExecutor();
+    this.retryScheduler = Executors.newSingleThreadScheduledExecutor();
+    this.statusListener = statusListener;
+    this.networkChecker = this::isNetworkAvailableDefault;
+    this.connectivityManager = manager;
+    this.networkCallback = callback;
+    this.directUploadMode = false;
+    EdgeEventUploadWorker.ensurePeriodic(appContext);
+    EdgeEventUploadWorker.enqueueImmediate(appContext);
+  }
 
+  EdgeEventReporter(
+    @NonNull ReporterQueueStore queueStore,
+    @NonNull StorageCenter storageCenter,
+    @NonNull EventCenter eventCenter,
+    @NonNull EventUploader eventUploader,
+    @NonNull ExecutorService uploadExecutor,
+    @NonNull ScheduledExecutorService retryScheduler,
+    @NonNull StatusListener statusListener,
+    @NonNull BooleanSupplier networkChecker
+  ) {
+    this.appContext = null;
+    this.queueStore = queueStore;
+    this.storageCenter = storageCenter;
+    this.eventCenter = eventCenter;
+    this.eventUploader = eventUploader;
+    this.statusListener = statusListener;
+    this.networkChecker = networkChecker;
+    this.connectivityManager = null;
+    this.networkCallback = null;
+    this.uploadExecutor = uploadExecutor;
+    this.retryScheduler = retryScheduler;
+    this.directUploadMode = true;
     pumpUploads();
   }
 
@@ -144,15 +184,22 @@ public final class EdgeEventReporter implements AutoCloseable {
     if (closed || !fatigue.drowsy) {
       return;
     }
+    reportRiskCandidate(toFatigueCandidate(fatigue, eventTimeMs));
+  }
 
-    EdgeEvent event = eventCenter.process(toCandidate(fatigue, eventTimeMs));
+  public void reportRiskCandidate(@NonNull RiskEventCandidate candidate) {
+    if (closed || !candidate.getShouldTrigger()) {
+      return;
+    }
+
+    EdgeEvent event = eventCenter.process(candidate);
     if (event == null) {
       updateQueuedStatus("事件上报：窗口内去抖");
       return;
     }
 
     updateQueuedStatus("事件上报：已入队 " + event.getEventId());
-    pumpUploads();
+    triggerUpload();
   }
 
   @NonNull
@@ -179,6 +226,17 @@ public final class EdgeEventReporter implements AutoCloseable {
     retryScheduler.shutdownNow();
   }
 
+  private void triggerUpload() {
+    pumpUploads();
+    if (directUploadMode) {
+      return;
+    }
+    Context context = appContext;
+    if (context != null) {
+      EdgeEventUploadWorker.enqueueImmediate(context);
+    }
+  }
+
   private void pumpUploads() {
     if (closed) {
       return;
@@ -199,7 +257,7 @@ public final class EdgeEventReporter implements AutoCloseable {
           return;
         }
 
-        List<UploadQueueItem> batch = storageCenter.claimUploadBatch(UPLOAD_BATCH_SIZE, nowMs);
+        List<UploadQueueItem> batch = storageCenter.claimUploadBatch(resolveBatchSize(nowMs), nowMs);
         if (batch.isEmpty()) {
           scheduleNextRetryIfNeeded(nowMs);
           if (queueStore.countQueuedEvents(nowMs) == 0) {
@@ -215,7 +273,8 @@ public final class EdgeEventReporter implements AutoCloseable {
               item.getEvent().getEventId(),
               receipt.getCode(),
               firstNonBlank(receipt.getTransportError(), receipt.getMessage(), null),
-              receipt.getTraceId()
+              receipt.getTraceId(),
+              toFailureClass(receipt)
             ),
             System.currentTimeMillis()
           );
@@ -264,6 +323,7 @@ public final class EdgeEventReporter implements AutoCloseable {
           "事件上报：服务器不可达或请求失败"
             + " http=" + httpStatus
             + " code=" + receipt.getCode()
+            + " class=" + row.getFailureClass().name()
             + " after=" + waitMs + "ms"
             + " queue=" + queueStore.countQueuedEvents(System.currentTimeMillis())
         );
@@ -332,7 +392,51 @@ public final class EdgeEventReporter implements AutoCloseable {
     statusListener.onStatusChanged(statusLine);
   }
 
+  void onNetworkAvailable() {
+    handleNetworkAvailable();
+  }
+
+  private int resolveBatchSize(long nowMs) {
+    int queued = queueStore.countQueuedEvents(nowMs);
+    if (queued <= UPLOAD_BATCH_SIZE) {
+      return UPLOAD_BATCH_SIZE;
+    }
+    return Math.min(MAX_UPLOAD_BATCH_SIZE, Math.max(UPLOAD_BATCH_SIZE, queued / 2));
+  }
+
+  @NonNull
+  private UploadFailureClass toFailureClass(@NonNull UploadReceipt receipt) {
+    switch (receipt.getFailureCategory()) {
+      case NETWORK:
+        return UploadFailureClass.NETWORK;
+      case TIMEOUT:
+        return UploadFailureClass.TIMEOUT;
+      case SERVER:
+        return UploadFailureClass.SERVER;
+      case CLIENT:
+        return UploadFailureClass.CLIENT;
+      case RESPONSE_PARSE:
+        return UploadFailureClass.RESPONSE_PARSE;
+      case UNKNOWN:
+        return UploadFailureClass.UNKNOWN;
+      case NONE:
+      default:
+        return UploadFailureClass.NONE;
+    }
+  }
+
   private boolean isNetworkAvailable() {
+    return networkChecker.getAsBoolean();
+  }
+
+  private void handleNetworkAvailable() {
+    if (!closed) {
+      updateStatus("事件上报：网络恢复，开始重试");
+      triggerUpload();
+    }
+  }
+
+  private boolean isNetworkAvailableDefault() {
     ConnectivityManager manager = connectivityManager;
     if (manager == null) {
       return true;
@@ -355,7 +459,7 @@ public final class EdgeEventReporter implements AutoCloseable {
   }
 
   @NonNull
-  private RiskEventCandidate toCandidate(@NonNull LocalFatigueAnalyzer.Result fatigue, long eventTimeMs) {
+  private RiskEventCandidate toFatigueCandidate(@NonNull LocalFatigueAnalyzer.Result fatigue, long eventTimeMs) {
     Set<TriggerReason> triggerReasons = new LinkedHashSet<>();
     if (fatigue.eyesClosed) {
       triggerReasons.add(TriggerReason.FATIGUE_PERCLOS_SUSTAINED);
@@ -412,7 +516,16 @@ public final class EdgeEventReporter implements AutoCloseable {
     void onStatusChanged(@NonNull String statusLine);
   }
 
-  private static final class PrefsQueueStore implements EdgeEventDao, DeviceConfigDao {
+  interface ReporterQueueStore extends EdgeEventDao, DeviceConfigDao {
+    int countQueuedEvents(long nowMs);
+
+    boolean hasReadyEvents(long nowMs);
+
+    @Nullable
+    Long nextRetryAtMs(long nowMs);
+  }
+
+  static class PrefsQueueStore implements ReporterQueueStore {
     private static final String PREFS_NAME = "driveedge_event_queue";
     private static final String KEY_EDGE_EVENTS = "edge_events";
     private static final String KEY_DEVICE_CONFIGS = "device_configs";
@@ -424,12 +537,12 @@ public final class EdgeEventReporter implements AutoCloseable {
     @NonNull
     private final LinkedHashMap<String, DeviceConfigRow> deviceConfigs = new LinkedHashMap<>();
 
-    private PrefsQueueStore(@NonNull Context context) {
+    PrefsQueueStore(@NonNull Context context) {
       prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
       load();
     }
 
-    private PrefsQueueStore() {
+    PrefsQueueStore() {
       prefs = null;
     }
 
@@ -449,6 +562,8 @@ public final class EdgeEventReporter implements AutoCloseable {
             existing.getLastErrorMessage(),
             existing.getServerTraceId(),
             existing.getNextRetryAtMs(),
+            existing.getLastAttemptAtMs(),
+            existing.getFailureClass(),
             row.getUpdatedAtMs()
           )
         );
@@ -478,7 +593,23 @@ public final class EdgeEventReporter implements AutoCloseable {
           readyRows.add(row);
         }
       }
-      readyRows.sort((left, right) -> Long.compare(left.getEvent().getCreatedAtMs(), right.getEvent().getCreatedAtMs()));
+      readyRows.sort((left, right) -> {
+        int priorityCompare = Integer.compare(priorityOf(left), priorityOf(right));
+        if (priorityCompare != 0) {
+          return priorityCompare;
+        }
+        long leftRetryAt = left.getNextRetryAtMs() == null ? Long.MIN_VALUE : left.getNextRetryAtMs();
+        long rightRetryAt = right.getNextRetryAtMs() == null ? Long.MIN_VALUE : right.getNextRetryAtMs();
+        if (leftRetryAt != rightRetryAt) {
+          return Long.compare(leftRetryAt, rightRetryAt);
+        }
+        long leftAttemptAt = left.getLastAttemptAtMs() == null ? Long.MIN_VALUE : left.getLastAttemptAtMs();
+        long rightAttemptAt = right.getLastAttemptAtMs() == null ? Long.MIN_VALUE : right.getLastAttemptAtMs();
+        if (leftAttemptAt != rightAttemptAt) {
+          return Long.compare(leftAttemptAt, rightAttemptAt);
+        }
+        return Long.compare(left.getEvent().getCreatedAtMs(), right.getEvent().getCreatedAtMs());
+      });
       return readyRows.size() > limit ? new ArrayList<>(readyRows.subList(0, limit)) : readyRows;
     }
 
@@ -493,7 +624,8 @@ public final class EdgeEventReporter implements AutoCloseable {
       return deviceConfigs.get(deviceId);
     }
 
-    private synchronized int countQueuedEvents(long nowMs) {
+    @Override
+    public synchronized int countQueuedEvents(long nowMs) {
       int count = 0;
       for (EdgeEventRow row : edgeEvents.values()) {
         if (row.getUploadStatus() == UploadStatus.PENDING || row.getUploadStatus() == UploadStatus.RETRY_WAIT || row.getUploadStatus() == UploadStatus.SENDING) {
@@ -503,7 +635,8 @@ public final class EdgeEventReporter implements AutoCloseable {
       return count;
     }
 
-    private synchronized boolean hasReadyEvents(long nowMs) {
+    @Override
+    public synchronized boolean hasReadyEvents(long nowMs) {
       for (EdgeEventRow row : edgeEvents.values()) {
         if (isReadyForUpload(row, nowMs)) {
           return true;
@@ -513,7 +646,8 @@ public final class EdgeEventReporter implements AutoCloseable {
     }
 
     @Nullable
-    private synchronized Long nextRetryAtMs(long nowMs) {
+    @Override
+    public synchronized Long nextRetryAtMs(long nowMs) {
       Long nextRetryAtMs = null;
       for (EdgeEventRow row : edgeEvents.values()) {
         if (row.getUploadStatus() != UploadStatus.RETRY_WAIT || row.getNextRetryAtMs() == null) {
@@ -648,6 +782,8 @@ public final class EdgeEventReporter implements AutoCloseable {
         object.put("lastErrorMessage", row.getLastErrorMessage() == null ? JSONObject.NULL : row.getLastErrorMessage());
         object.put("serverTraceId", row.getServerTraceId() == null ? JSONObject.NULL : row.getServerTraceId());
         object.put("nextRetryAtMs", row.getNextRetryAtMs() == null ? JSONObject.NULL : row.getNextRetryAtMs());
+        object.put("lastAttemptAtMs", row.getLastAttemptAtMs() == null ? JSONObject.NULL : row.getLastAttemptAtMs());
+        object.put("failureClass", row.getFailureClass().name());
         object.put("updatedAtMs", row.getUpdatedAtMs());
       } catch (JSONException ignored) {
       }
@@ -682,6 +818,12 @@ public final class EdgeEventReporter implements AutoCloseable {
       if (uploadStatus == UploadStatus.SENDING) {
         uploadStatus = UploadStatus.RETRY_WAIT;
       }
+      UploadFailureClass failureClass = UploadFailureClass.NONE;
+      String failureClassName = object.optString("failureClass", UploadFailureClass.NONE.name());
+      try {
+        failureClass = UploadFailureClass.valueOf(failureClassName);
+      } catch (IllegalArgumentException ignored) {
+      }
       EdgeEvent event = new EdgeEvent(
         object.optString("eventId", ""),
         object.isNull("fleetId") ? null : object.optString("fleetId", null),
@@ -708,6 +850,8 @@ public final class EdgeEventReporter implements AutoCloseable {
         object.isNull("lastErrorMessage") ? null : object.optString("lastErrorMessage", null),
         object.isNull("serverTraceId") ? null : object.optString("serverTraceId", null),
         nextRetryAtMs,
+        object.isNull("lastAttemptAtMs") ? null : object.optLong("lastAttemptAtMs"),
+        failureClass,
         object.optLong("updatedAtMs", event.getCreatedAtMs())
       );
     }
@@ -745,5 +889,49 @@ public final class EdgeEventReporter implements AutoCloseable {
     private UploadStatus normalizePersistedStatus(@NonNull UploadStatus uploadStatus) {
       return uploadStatus == UploadStatus.SENDING ? UploadStatus.RETRY_WAIT : uploadStatus;
     }
+
+    private int priorityOf(@NonNull EdgeEventRow row) {
+      switch (row.getUploadStatus()) {
+        case RETRY_WAIT:
+          return 0;
+        case PENDING:
+          return 1;
+        default:
+          return 2;
+      }
+    }
+  }
+
+  @NonNull
+  static ReporterQueueStore createQueueStore(@NonNull Context context) {
+    try {
+      return new SQLiteOutboxStore(context.getApplicationContext());
+    } catch (Exception ignored) {
+      try {
+        return new PrefsQueueStore(context.getApplicationContext());
+      } catch (Exception nested) {
+        return new PrefsQueueStore();
+      }
+    }
+  }
+
+  @NonNull
+  static StorageCenter createStorageCenter(@NonNull ReporterQueueStore store) {
+    return new StorageCenter(store, store, new StorageConfig(), Clock.systemUTC());
+  }
+
+  @NonNull
+  static EventUploader createEventUploader() {
+    return new EventUploader(
+      new UploaderConfig(
+        BuildConfig.EDGE_SERVER_BASE_URL,
+        BuildConfig.EDGE_DEVICE_TOKEN,
+        "/api/v1/events",
+        "Idempotency-Key",
+        "X-Event-Id",
+        Duration.ofSeconds(5),
+        Duration.ofSeconds(8)
+      )
+    );
   }
 }

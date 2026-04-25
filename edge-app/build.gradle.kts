@@ -1,5 +1,20 @@
+import java.util.Properties
+
+import org.gradle.api.Project
+
 plugins {
   id("com.android.application") version "8.5.2"
+}
+
+fun Project.localProperty(name: String): String? {
+  val file = rootProject.file("local.properties")
+  if (!file.exists()) return null
+
+  val properties = Properties()
+  file.inputStream().use { input ->
+    properties.load(input)
+  }
+  return properties.getProperty(name)
 }
 
 android {
@@ -27,13 +42,24 @@ android {
 
   flavorDimensions += "endpoint"
   productFlavors {
+    val simulatorServerBaseUrl =
+      providers.gradleProperty("edgeSimulatorServerBaseUrl")
+        .orElse(providers.provider { localProperty("edgeSimulatorServerBaseUrl") })
+        .orElse("http://10.0.2.2:8080")
+        .get()
+    val hostlocalServerBaseUrl =
+      providers.gradleProperty("edgeHostlocalServerBaseUrl")
+        .orElse(providers.provider { localProperty("edgeHostlocalServerBaseUrl") })
+        .orElse("http://127.0.0.1:8080")
+        .get()
+
     create("simulator") {
       dimension = "endpoint"
-      buildConfigField("String", "EDGE_SERVER_BASE_URL", "\"http://10.0.2.2:8080\"")
+      buildConfigField("String", "EDGE_SERVER_BASE_URL", "\"$simulatorServerBaseUrl\"")
     }
     create("hostlocal") {
       dimension = "endpoint"
-      buildConfigField("String", "EDGE_SERVER_BASE_URL", "\"http://127.0.0.1:8080\"")
+      buildConfigField("String", "EDGE_SERVER_BASE_URL", "\"$hostlocalServerBaseUrl\"")
     }
   }
 
@@ -60,11 +86,16 @@ dependencies {
   implementation("com.google.android.material:material:1.12.0")
   implementation("androidx.activity:activity:1.9.1")
   implementation("androidx.lifecycle:lifecycle-service:2.8.4")
+  implementation("androidx.work:work-runtime:2.9.1")
   implementation("io.github.crow-misia.libyuv:libyuv-android:0.43.2")
   implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
   implementation("com.google.mediapipe:tasks-vision:latest.release")
   implementation(project(":module-event-center"))
+  implementation(project(":module-infer-yolo"))
   implementation(project(":module-risk-engine"))
   implementation(project(":module-storage"))
+  implementation(project(":module-temporal-engine"))
   implementation(project(":module-uploader"))
+  testImplementation(kotlin("test"))
+  testImplementation("junit:junit:4.13.2")
 }

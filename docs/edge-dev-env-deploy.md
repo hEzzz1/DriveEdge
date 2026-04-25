@@ -113,7 +113,7 @@ adb logcat | rg -i "DriveEdge|YOLO|Upload|traceId"
    - 请求头 `X-Device-Token`
    - 幂等键 `eventId`
    - 响应字段 `code/message/data/traceId`
-5. Android 模拟器访问宿主机服务时使用 `http://10.0.2.2:8080`（不要使用模拟器内的 `127.0.0.1`）。
+5. 当前联调目标服务地址由 Nginx 代理转发，使用部署环境配置的代理地址，不直接暴露公网 IP，也不使用 `8080` 端口。
 
 ## 7. 一键自检
 仓库内提供脚本：

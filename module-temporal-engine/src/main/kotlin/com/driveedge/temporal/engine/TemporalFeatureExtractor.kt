@@ -17,6 +17,12 @@ object TemporalFeatureExtractor {
         blinkRate = 0.0,
         yawnCount = 0,
         headPose = HeadPose.UNKNOWN,
+        headPitch = 0.0,
+        headYaw = 0.0,
+        gazeOffset = 0.0,
+        headPoseStability = 0.0,
+        headDownDurationMs = 0L,
+        gazeOffsetDurationMs = 0L,
       )
     }
 
@@ -31,6 +37,16 @@ object TemporalFeatureExtractor {
     val blinkRate = blinkCount * 60_000.0 / windowDurationMs.toDouble()
     val yawnCount = computeYawnCount(frames, frameIntervalMs, config)
     val headPose = computeDominantHeadPose(frames)
+    val headPitch = averageOf(frames) { it.headPitch }
+    val headYaw = averageOf(frames) { it.headYaw }
+    val gazeOffset = averageOf(frames) { it.gazeOffset }
+    val headPoseStability = computeHeadPoseStability(frames)
+    val headDownDurationMs = computeSustainedDurationMs(frames, frameIntervalMs) {
+      it.headPitch >= config.headDownThreshold
+    }
+    val gazeOffsetDurationMs = computeSustainedDurationMs(frames, frameIntervalMs) {
+      it.gazeOffset >= config.gazeOffsetThreshold
+    }
 
     return FeatureWindow(
       windowStartMs = windowStart,
@@ -40,6 +56,55 @@ object TemporalFeatureExtractor {
       blinkRate = blinkRate,
       yawnCount = yawnCount,
       headPose = headPose,
+      headPitch = headPitch,
+      headYaw = headYaw,
+      gazeOffset = gazeOffset,
+      headPoseStability = headPoseStability,
+      headDownDurationMs = headDownDurationMs,
+      gazeOffsetDurationMs = gazeOffsetDurationMs,
+    )
+  }
+
+  fun smooth(
+    windows: List<FeatureWindow>,
+    previousWindow: FeatureWindow?,
+    config: TemporalEngineConfig = TemporalEngineConfig(),
+  ): FeatureWindow {
+    if (windows.isEmpty()) {
+      return previousWindow ?: extract(emptyList(), config)
+    }
+    val latest = windows.last()
+    val previous = previousWindow ?: return latest
+    val alpha = config.featureEmaAlpha
+
+    return FeatureWindow(
+      windowStartMs = latest.windowStartMs,
+      windowEndMs = latest.windowEndMs,
+      windowDurationMs = latest.windowDurationMs,
+      perclos = ema(previous.perclos, latest.perclos, alpha),
+      blinkRate = ema(previous.blinkRate, latest.blinkRate, alpha),
+      yawnCount = ema(previous.yawnCount.toDouble(), latest.yawnCount.toDouble(), alpha).toInt(),
+      headPose = smoothHeadPose(windows, previous.headPose, config),
+      headPitch = ema(previous.headPitch, latest.headPitch, alpha),
+      headYaw = ema(previous.headYaw, latest.headYaw, alpha),
+      gazeOffset = ema(previous.gazeOffset, latest.gazeOffset, alpha),
+      headPoseStability = ema(previous.headPoseStability, latest.headPoseStability, alpha),
+      headDownDurationMs = smoothDurationMs(
+        windows = windows,
+        previousDurationMs = previous.headDownDurationMs,
+        latestDurationMs = latest.headDownDurationMs,
+        triggerThresholdMs = config.headDownMinDurationMs,
+        selector = { it.headDownDurationMs },
+        config = config,
+      ),
+      gazeOffsetDurationMs = smoothDurationMs(
+        windows = windows,
+        previousDurationMs = previous.gazeOffsetDurationMs,
+        latestDurationMs = latest.gazeOffsetDurationMs,
+        triggerThresholdMs = config.gazeOffsetMinDurationMs,
+        selector = { it.gazeOffsetDurationMs },
+        config = config,
+      ),
     )
   }
 
@@ -55,6 +120,9 @@ object TemporalFeatureExtractor {
           eyeState = pickEyeState(frameDetections, config),
           yawn = hasYawn(frameDetections, config),
           pose = pickHeadPose(frameDetections, config),
+          headPitch = pickHeadPitch(frameDetections, config),
+          headYaw = pickHeadYaw(frameDetections, config),
+          gazeOffset = pickGazeOffset(frameDetections, config),
         )
       }
       .sortedBy { it.timestampMs }
@@ -63,8 +131,8 @@ object TemporalFeatureExtractor {
     frameDetections: List<DetectionResult>,
     config: TemporalEngineConfig,
   ): EyeState {
-    val closedScore = frameDetections.maxScore(config.eyeClosedLabels)
-    val openScore = frameDetections.maxScore(config.eyeOpenLabels)
+    val closedScore = frameDetections.maxScore(config.eyeClosedLabels, config.minSignalConfidence)
+    val openScore = frameDetections.maxScore(config.eyeOpenLabels, config.minSignalConfidence)
     if (closedScore == null && openScore == null) {
       return EyeState.UNKNOWN
     }
@@ -74,17 +142,17 @@ object TemporalFeatureExtractor {
   private fun hasYawn(
     frameDetections: List<DetectionResult>,
     config: TemporalEngineConfig,
-  ): Boolean = frameDetections.maxScore(config.yawnLabels) != null
+  ): Boolean = frameDetections.maxScore(config.yawnLabels, config.minSignalConfidence) != null
 
   private fun pickHeadPose(
     frameDetections: List<DetectionResult>,
     config: TemporalEngineConfig,
   ): HeadPose {
     val poseScores = mapOf(
-      HeadPose.DOWN to frameDetections.maxScore(config.headDownLabels),
-      HeadPose.LEFT to frameDetections.maxScore(config.headLeftLabels),
-      HeadPose.RIGHT to frameDetections.maxScore(config.headRightLabels),
-      HeadPose.FORWARD to frameDetections.maxScore(config.headForwardLabels),
+      HeadPose.DOWN to frameDetections.maxScore(config.headDownLabels, config.minSignalConfidence),
+      HeadPose.LEFT to frameDetections.maxScore(config.headLeftLabels, config.minSignalConfidence),
+      HeadPose.RIGHT to frameDetections.maxScore(config.headRightLabels, config.minSignalConfidence),
+      HeadPose.FORWARD to frameDetections.maxScore(config.headForwardLabels, config.minSignalConfidence),
     )
 
     val best = poseScores
@@ -92,6 +160,31 @@ object TemporalFeatureExtractor {
       .maxByOrNull { it.value ?: -1f }
 
     return best?.key ?: HeadPose.UNKNOWN
+  }
+
+  private fun pickHeadPitch(
+    frameDetections: List<DetectionResult>,
+    config: TemporalEngineConfig,
+  ): Double = (frameDetections.maxScore(config.headDownLabels, config.minSignalConfidence) ?: 0f).toDouble()
+
+  private fun pickHeadYaw(
+    frameDetections: List<DetectionResult>,
+    config: TemporalEngineConfig,
+  ): Double {
+    val left = frameDetections.maxScore(config.headLeftLabels, config.minSignalConfidence) ?: 0f
+    val right = frameDetections.maxScore(config.headRightLabels, config.minSignalConfidence) ?: 0f
+    return (right - left).toDouble()
+  }
+
+  private fun pickGazeOffset(
+    frameDetections: List<DetectionResult>,
+    config: TemporalEngineConfig,
+  ): Double {
+    val left = frameDetections.maxScore(config.gazeLeftLabels, config.minSignalConfidence) ?: 0f
+    val right = frameDetections.maxScore(config.gazeRightLabels, config.minSignalConfidence) ?: 0f
+    val down = frameDetections.maxScore(config.gazeDownLabels, config.minSignalConfidence) ?: 0f
+    val forward = frameDetections.maxScore(config.gazeForwardLabels, config.minSignalConfidence) ?: 0f
+    return maxOf(left, right, down).minus(forward).coerceAtLeast(0f).toDouble()
   }
 
   private fun computePerclos(frames: List<FrameState>): Double {
@@ -173,6 +266,107 @@ object TemporalFeatureExtractor {
     return counts.maxByOrNull { it.value }?.key ?: HeadPose.UNKNOWN
   }
 
+  private fun computeHeadPoseStability(frames: List<FrameState>): Double {
+    val validPoses = frames.map { it.pose }.filter { it != HeadPose.UNKNOWN }
+    if (validPoses.isEmpty()) {
+      return 0.0
+    }
+    val dominantCount = validPoses.groupingBy { it }.eachCount().maxOf { it.value }
+    return dominantCount.toDouble() / validPoses.size.toDouble()
+  }
+
+  private fun computeSustainedDurationMs(
+    frames: List<FrameState>,
+    frameIntervalMs: Long,
+    predicate: (FrameState) -> Boolean,
+  ): Long {
+    var best = 0L
+    var runStart: Long? = null
+    var runEnd: Long? = null
+    for (frame in frames) {
+      if (predicate(frame)) {
+        if (runStart == null) {
+          runStart = frame.timestampMs
+        }
+        runEnd = frame.timestampMs
+        continue
+      }
+      if (runStart != null && runEnd != null) {
+        best = max(best, (runEnd - runStart) + frameIntervalMs)
+      }
+      runStart = null
+      runEnd = null
+    }
+    if (runStart != null && runEnd != null) {
+      best = max(best, (runEnd - runStart) + frameIntervalMs)
+    }
+    return best
+  }
+
+  private fun averageOf(
+    frames: List<FrameState>,
+    selector: (FrameState) -> Double,
+  ): Double {
+    if (frames.isEmpty()) {
+      return 0.0
+    }
+    return frames.sumOf(selector) / frames.size.toDouble()
+  }
+
+  private fun smoothHeadPose(
+    windows: List<FeatureWindow>,
+    previousPose: HeadPose,
+    config: TemporalEngineConfig,
+  ): HeadPose {
+    val poses = windows.map { it.headPose }.filter { it != HeadPose.UNKNOWN }
+    if (poses.isEmpty()) {
+      return previousPose
+    }
+
+    val counts = poses.groupingBy { it }.eachCount()
+    val dominant = counts.maxByOrNull { it.value }?.key ?: HeadPose.UNKNOWN
+    val dominantCount = counts[dominant] ?: 0
+    if (dominantCount >= config.stableWindowHitCount) {
+      return dominant
+    }
+
+    if (previousPose != HeadPose.UNKNOWN) {
+      val recent = poses.takeLast(minOf(config.clearWindowCount, poses.size))
+      val clearHits = recent.count { it != previousPose }
+      if (clearHits < config.clearWindowCount) {
+        return previousPose
+      }
+    }
+
+    return dominant
+  }
+
+  private fun smoothDurationMs(
+    windows: List<FeatureWindow>,
+    previousDurationMs: Long,
+    latestDurationMs: Long,
+    triggerThresholdMs: Long,
+    selector: (FeatureWindow) -> Long,
+    config: TemporalEngineConfig,
+  ): Long {
+    val hitCount = windows.count { selector(it) >= triggerThresholdMs }
+    val recentClearCount = windows.takeLast(minOf(config.clearWindowCount, windows.size)).count {
+      selector(it) < triggerThresholdMs
+    }
+    return when {
+      hitCount >= config.stableWindowHitCount -> max(previousDurationMs, latestDurationMs)
+      previousDurationMs >= triggerThresholdMs && recentClearCount < config.clearWindowCount ->
+        max((previousDurationMs * (1.0 - (1.0 - config.featureEmaAlpha) * 0.5)).toLong(), latestDurationMs)
+      else -> ema(previousDurationMs.toDouble(), latestDurationMs.toDouble(), config.featureEmaAlpha).toLong()
+    }
+  }
+
+  private fun ema(
+    previousValue: Double,
+    latestValue: Double,
+    alpha: Double,
+  ): Double = (alpha * latestValue) + ((1.0 - alpha) * previousValue)
+
   private fun buildEyeRuns(frames: List<FrameState>): List<EyeRun> {
     if (frames.isEmpty()) {
       return emptyList()
@@ -217,14 +411,17 @@ object TemporalFeatureExtractor {
     return deltas[deltas.size / 2]
   }
 
-  private fun List<DetectionResult>.maxScore(labelSet: Set<String>): Float? {
+  private fun List<DetectionResult>.maxScore(
+    labelSet: Set<String>,
+    minConfidence: Float,
+  ): Float? {
     if (labelSet.isEmpty()) {
       return null
     }
     val normalized = labelSet.asSequence().map { it.lowercase() }.toSet()
     return this
       .asSequence()
-      .filter { it.label.lowercase() in normalized }
+      .filter { it.label.lowercase() in normalized && it.confidence >= minConfidence }
       .map { it.confidence }
       .maxOrNull()
   }
@@ -234,6 +431,9 @@ object TemporalFeatureExtractor {
     val eyeState: EyeState,
     val yawn: Boolean,
     val pose: HeadPose,
+    val headPitch: Double,
+    val headYaw: Double,
+    val gazeOffset: Double,
   )
 
   private data class EyeRun(

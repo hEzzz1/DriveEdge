@@ -16,17 +16,20 @@
   <string name="status_connected">状态：服务已连接，等待帧回调</string>
   <string name="status_running">状态：采集中 %1$dx%2$d 旋转=%3$d FPS=%4$d ts=%5$d</string>
   <string name="status_stopped">状态：已停止</string>
-  <string name="status_local_boot">本地疲劳检测：初始化中</string>
+  <string name="status_local_boot">本地疲劳快检：初始化中</string>
   <string name="status_local_idle">本地 YOLOv8-Face：待启动\nmodel=%1$s\nsession=%2$s</string>
   <string name="status_local_running">本地 YOLOv8-Face：IFPS=%1$d total=%2$dms infer=%3$dms det=%4$d conf=%5$.2f shape=%6$s</string>
   <string name="status_local_error">本地 YOLOv8-Face：异常 %1$s</string>
   <string name="status_local_stopped">本地 YOLOv8-Face：已停止</string>
-  <string name="status_fatigue_normal">疲劳状态：正常</string>
-  <string name="status_fatigue_warning">疲劳警告：%1$s</string>
+  <string name="status_fatigue_normal">疲劳快检：正常</string>
+  <string name="status_fatigue_warning">疲劳快检告警：%1$s</string>
+  <string name="status_distraction_normal">分心时序：正常</string>
+  <string name="status_distraction_warning">分心时序告警：%1$s</string>
   <string name="status_error">状态：异常 %1$s</string>
   <string name="status_camera_failed">状态：相机异常 code=%1$d</string>
   <string name="status_session_failed">状态：相机会话创建失败</string>
-  <string name="toast_fatigue_warning">疲劳警告：%1$s</string>
+  <string name="toast_fatigue_warning">疲劳快检告警：%1$s</string>
+  <string name="toast_distraction_warning">分心时序告警：%1$s</string>
 
   <string name="permissions_denied">相机权限未授权，无法启动采集</string>
 </resources>

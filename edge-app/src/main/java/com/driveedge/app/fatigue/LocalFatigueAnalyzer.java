@@ -1,121 +1,102 @@
 package com.driveedge.app.fatigue;
 
-import android.content.Context;
-import android.graphics.Bitmap;
-import android.os.SystemClock;
-
 import androidx.annotation.NonNull;
 
-import com.google.mediapipe.framework.image.BitmapImageBuilder;
-import com.google.mediapipe.framework.image.MPImage;
-import com.google.mediapipe.tasks.components.containers.Category;
-import com.google.mediapipe.tasks.core.BaseOptions;
-import com.google.mediapipe.tasks.vision.core.RunningMode;
-import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker;
-import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult;
-
-import java.util.Collections;
-import java.util.List;
 import java.util.Locale;
 
 public final class LocalFatigueAnalyzer implements AutoCloseable {
+  private final int missingFaceToleranceFrames;
+  private int missingFaceFrames = 0;
+  private float lastEyeClosedScore = 0f;
+  private float lastMouthOpenScore = 0f;
+  private boolean lastEyesClosed = false;
+  private boolean lastYawning = false;
   @NonNull
-  private final FaceLandmarker faceLandmarker;
-  private int closedEyeFrames = 0;
-  private int yawnFrames = 0;
+  private String lastEventSummary = "fatigue_normal";
 
-  public LocalFatigueAnalyzer(@NonNull Context context, @NonNull String assetPath) {
-    BaseOptions baseOptions = BaseOptions.builder()
-      .setModelAssetPath(assetPath)
-      .build();
-    FaceLandmarker.FaceLandmarkerOptions options = FaceLandmarker.FaceLandmarkerOptions.builder()
-      .setBaseOptions(baseOptions)
-      .setRunningMode(RunningMode.IMAGE)
-      .setNumFaces(1)
-      .setMinFaceDetectionConfidence(0.4f)
-      .setMinFacePresenceConfidence(0.4f)
-      .setMinTrackingConfidence(0.4f)
-      .setOutputFaceBlendshapes(true)
-      .build();
-    faceLandmarker = FaceLandmarker.createFromOptions(context, options);
+  public LocalFatigueAnalyzer() {
+    this(2);
+  }
+
+  public LocalFatigueAnalyzer(int missingFaceToleranceFrames) {
+    if (missingFaceToleranceFrames < 0) {
+      throw new IllegalArgumentException("missingFaceToleranceFrames must be >= 0");
+    }
+    this.missingFaceToleranceFrames = missingFaceToleranceFrames;
   }
 
   @NonNull
-  public Result analyzeBitmap(@NonNull Bitmap bitmap) {
-    long startedAt = SystemClock.elapsedRealtime();
-    MPImage image = new BitmapImageBuilder(bitmap).build();
-    FaceLandmarkerResult result = faceLandmarker.detect(image);
-    long finishedAt = SystemClock.elapsedRealtime();
-
-    List<List<Category>> blendshapeGroups = result == null
-      ? Collections.emptyList()
-      : result.faceBlendshapes().orElse(Collections.emptyList());
-    if (blendshapeGroups == null || blendshapeGroups.isEmpty()) {
-      closedEyeFrames = 0;
-      yawnFrames = 0;
-      return new Result(0, 0f, 0f, false, false, false, 0f, "-", (int) Math.max(0L, finishedAt - startedAt));
+  public Result analyze(@NonNull LocalFaceSignalAnalyzer.Result faceSignals) {
+    if (faceSignals.faces <= 0) {
+      missingFaceFrames++;
+      if (missingFaceFrames > missingFaceToleranceFrames) {
+        resetState();
+        return Result.empty(faceSignals.inferenceLatencyMs);
+      }
+      return new Result(
+        0,
+        lastEyeClosedScore,
+        lastMouthOpenScore,
+        lastEyesClosed,
+        lastYawning,
+        isDrowsy(),
+        Math.max(lastEyeClosedScore, lastMouthOpenScore),
+        lastEventSummary,
+        faceSignals.inferenceLatencyMs
+      );
     }
+    missingFaceFrames = 0;
 
-    List<Category> firstFace = blendshapeGroups.get(0);
-    float eyeBlinkLeft = scoreOf(firstFace, "eyeBlinkLeft");
-    float eyeBlinkRight = scoreOf(firstFace, "eyeBlinkRight");
-    float jawOpen = scoreOf(firstFace, "jawOpen");
-    float eyeClosedScore = (eyeBlinkLeft + eyeBlinkRight) * 0.5f;
+    float eyeClosedScore = faceSignals.eyeClosedScore;
+    float jawOpen = faceSignals.mouthOpenScore;
 
     boolean eyesClosed = eyeClosedScore >= 0.55f;
     boolean yawning = jawOpen >= 0.35f;
 
-    if (eyesClosed) {
-      closedEyeFrames++;
-    } else {
-      closedEyeFrames = 0;
-    }
-    if (yawning) {
-      yawnFrames++;
-    } else {
-      yawnFrames = 0;
-    }
-
-    boolean drowsy = closedEyeFrames >= 3 || yawnFrames >= 3;
+    boolean drowsy = eyesClosed || yawning;
     float fatigueScore = Math.max(eyeClosedScore, jawOpen);
     String eventSummary;
-    if (closedEyeFrames >= 3) {
-      eventSummary = "eyes_closed";
-    } else if (yawnFrames >= 3) {
-      eventSummary = "yawning";
-    } else if (eyesClosed) {
-      eventSummary = "blink_like";
+    if (eyesClosed) {
+      eventSummary = "fatigue_eyes_closed";
     } else if (yawning) {
-      eventSummary = "mouth_open";
+      eventSummary = "fatigue_yawning";
     } else {
-      eventSummary = "normal";
+      eventSummary = "fatigue_normal";
     }
+    lastEyeClosedScore = eyeClosedScore;
+    lastMouthOpenScore = jawOpen;
+    lastEyesClosed = eyesClosed;
+    lastYawning = yawning;
+    lastEventSummary = eventSummary;
 
-      return new Result(
-        1,
-        eyeClosedScore,
-        jawOpen,
-        eyesClosed,
-        yawning,
-        drowsy,
-        fatigueScore,
-        eventSummary,
-        (int) Math.max(0L, finishedAt - startedAt)
+    return new Result(
+      1,
+      eyeClosedScore,
+      jawOpen,
+      eyesClosed,
+      yawning,
+      drowsy,
+      fatigueScore,
+      eventSummary,
+      faceSignals.inferenceLatencyMs
     );
   }
 
   @Override
   public void close() {
-    faceLandmarker.close();
   }
 
-  private float scoreOf(@NonNull List<Category> categories, @NonNull String name) {
-    for (Category category : categories) {
-      if (name.equals(category.categoryName())) {
-        return category.score();
-      }
-    }
-    return 0f;
+  private boolean isDrowsy() {
+    return lastEyesClosed || lastYawning;
+  }
+
+  private void resetState() {
+    missingFaceFrames = 0;
+    lastEyeClosedScore = 0f;
+    lastMouthOpenScore = 0f;
+    lastEyesClosed = false;
+    lastYawning = false;
+    lastEventSummary = "fatigue_normal";
   }
 
   public static final class Result {
@@ -156,13 +137,18 @@ public final class LocalFatigueAnalyzer implements AutoCloseable {
     public String summaryText() {
       return String.format(
         Locale.US,
-        "fatigue=%.2f eyes=%.2f mouth=%.2f alert=%s event=%s",
+        "fatigueQuick=%.2f eyes=%.2f mouth=%.2f candidate=%s event=%s",
         fatigueScore,
         eyeClosedScore,
         mouthOpenScore,
-        drowsy ? "warning" : "normal",
+        drowsy ? "active" : "clear",
         eventSummary
       );
+    }
+
+    @NonNull
+    static Result empty(int inferenceLatencyMs) {
+      return new Result(0, 0f, 0f, false, false, false, 0f, "fatigue_normal", inferenceLatencyMs);
     }
   }
 }

@@ -15,10 +15,24 @@ class EventUploader
         transport.postEvent(
           endpointUrl = config.endpointUrl(),
           deviceToken = config.deviceToken,
+          eventId = event.eventId,
+          idempotencyHeaderName = config.idempotencyHeaderName,
+          eventIdHeaderName = config.eventIdHeaderName,
           requestBody = payload,
           timeout = config.requestTimeout,
         )
       toReceipt(eventId = event.eventId, response = response)
+    } catch (error: TransportException) {
+      UploadReceipt(
+        eventId = event.eventId,
+        code = UploadReceipt.NETWORK_ERROR_CODE,
+        traceId = null,
+        message = error.message ?: error.javaClass.simpleName,
+        httpStatus = null,
+        responseBody = null,
+        transportError = error.message ?: error.javaClass.simpleName,
+        failureCategory = error.failureCategory,
+      )
     } catch (error: Exception) {
       UploadReceipt(
         eventId = event.eventId,
@@ -28,6 +42,7 @@ class EventUploader
         httpStatus = null,
         responseBody = null,
         transportError = error.message ?: error.javaClass.simpleName,
+        failureCategory = UploadFailureCategory.UNKNOWN,
       )
     }
   }
@@ -49,6 +64,7 @@ class EventUploader
         httpStatus = response.statusCode,
         responseBody = response.body,
         transportError = null,
+        failureCategory = UploadFailureCategory.RESPONSE_PARSE,
       )
     }
 
@@ -60,6 +76,12 @@ class EventUploader
       httpStatus = response.statusCode,
       responseBody = response.body,
       transportError = null,
+      failureCategory =
+        when {
+          response.statusCode >= 500 -> UploadFailureCategory.SERVER
+          response.statusCode >= 400 -> UploadFailureCategory.CLIENT
+          else -> UploadFailureCategory.NONE
+        },
     )
   }
 }
