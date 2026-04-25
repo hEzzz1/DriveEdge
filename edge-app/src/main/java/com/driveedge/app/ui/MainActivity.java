@@ -234,6 +234,7 @@ public final class MainActivity extends AppCompatActivity {
   private long quickFatigueCandidateStartedElapsedMs = 0L;
   private long lastQuickFatigueEventReportedElapsedMs = 0L;
   private int realtimeRiskMissingFaceFrames = 0;
+  private boolean analyzersReady = false;
   private long lastQuickFatigueDetectedElapsedMs = 0L;
   @NonNull
   private String lastQuickFatigueEventSummary = "fatigue_normal";
@@ -324,6 +325,7 @@ public final class MainActivity extends AppCompatActivity {
     recordButton.setOnClickListener(v -> toggleRecording());
     openRecordingsButton.setOnClickListener(v -> openRecordingsDirectory());
 
+    startButton.setEnabled(false);
     stopButton.setEnabled(false);
     recordButton.setEnabled(false);
     updateRecordButton();
@@ -334,6 +336,7 @@ public final class MainActivity extends AppCompatActivity {
         statusLine -> runOnUiThread(() -> edgeEventStatusLine = statusLine)
       );
     statusView.setText(getString(R.string.status_idle));
+    preloadLocalAnalyzers();
   }
 
   @Override
@@ -349,6 +352,10 @@ public final class MainActivity extends AppCompatActivity {
   }
 
   private void ensurePermissionThenStart() {
+    if (!analyzersReady) {
+      fatigueStatusView.setText(getString(R.string.status_local_boot));
+      return;
+    }
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
       startCaptureInternal();
       return;
@@ -375,6 +382,28 @@ public final class MainActivity extends AppCompatActivity {
     }
   }
 
+  private void preloadLocalAnalyzers() {
+    fatigueStatusView.setText(getString(R.string.status_local_boot));
+    inferExecutor.execute(() -> {
+      try {
+        getOrCreateLocalFaceSignalAnalyzer();
+        getOrCreateLocalFatigueAnalyzer();
+        analyzersReady = true;
+        runOnUiThread(() -> {
+          startButton.setEnabled(true);
+          updateInferIdleStatus();
+        });
+      } catch (Throwable error) {
+        analyzersReady = false;
+        Log.e(TAG, "Analyzer preload failed", error);
+        runOnUiThread(() -> {
+          startButton.setEnabled(false);
+          fatigueStatusView.setText(getString(R.string.status_local_error, formatError(error)));
+        });
+      }
+    });
+  }
+
   private void stopCapture() {
     if (!captureStarted) {
       return;
@@ -392,6 +421,9 @@ public final class MainActivity extends AppCompatActivity {
     startButton.setEnabled(true);
     stopButton.setEnabled(false);
     recordButton.setEnabled(false);
+    if (!analyzersReady) {
+      startButton.setEnabled(false);
+    }
     updateRecordButton();
   }
 
@@ -437,7 +469,7 @@ public final class MainActivity extends AppCompatActivity {
       String cameraId = resolveFrontCameraId(manager);
       manager.openCamera(cameraId, cameraStateCallback, handler);
     } catch (Exception error) {
-      statusView.setText(getString(R.string.status_error, error.getClass().getSimpleName()));
+      postStatusText(getString(R.string.status_error, error.getClass().getSimpleName()));
     }
   }
 
@@ -792,8 +824,12 @@ public final class MainActivity extends AppCompatActivity {
         handler
       );
     } catch (Exception error) {
-      statusView.setText(getString(R.string.status_error, error.getClass().getSimpleName()));
+      postStatusText(getString(R.string.status_error, error.getClass().getSimpleName()));
     }
+  }
+
+  private void postStatusText(@NonNull String text) {
+    runOnUiThread(() -> statusView.setText(text));
   }
 
   private void applyHighQualityCaptureParams(@NonNull CaptureRequest.Builder builder, boolean withRecorder) {
