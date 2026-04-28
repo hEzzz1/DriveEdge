@@ -20,9 +20,12 @@ class EventCenterTest {
       EventCenter(
         config =
           EventCenterConfig(
+            deviceCode = "DEV-001",
             vehicleId = "VEH-1001",
+            enterpriseId = "100",
             fleetId = "FLEET-1",
             driverId = "DRIVER-9",
+            configVersion = "ruleset/1/1/1",
             algorithmVersion = "yolo-v8n-int8-20260407",
             debounceWindowMs = 5_000L,
           ),
@@ -35,6 +38,7 @@ class EventCenterTest {
     assertNotNull(event)
     assertEquals(1, eventStore.events.size)
     assertEquals(UploadStatus.PENDING, event.uploadStatus)
+    assertEquals("DEV-001", event.deviceCode)
     assertEquals("VEH-1001", event.vehicleId)
     assertEquals("FLEET-1", event.fleetId)
     assertEquals("DRIVER-9", event.driverId)
@@ -45,7 +49,7 @@ class EventCenterTest {
     val eventStore = InMemoryEventStore()
     val eventCenter =
       EventCenter(
-        config = EventCenterConfig(vehicleId = "VEH-1001"),
+        config = EventCenterConfig(deviceCode = "DEV-001", vehicleId = "VEH-1001"),
         eventStore = eventStore,
       )
 
@@ -61,7 +65,7 @@ class EventCenterTest {
     val eventStore = InMemoryEventStore()
     val eventCenter =
       EventCenter(
-        config = EventCenterConfig(vehicleId = "VEH-1001", debounceWindowMs = 5_000L),
+        config = EventCenterConfig(deviceCode = "DEV-001", vehicleId = "VEH-1001", debounceWindowMs = 5_000L),
         eventStore = eventStore,
       )
 

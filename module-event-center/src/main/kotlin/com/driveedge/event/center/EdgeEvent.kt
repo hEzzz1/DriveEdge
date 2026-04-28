@@ -14,9 +14,13 @@ enum class UploadStatus {
 
 data class EdgeEvent(
   val eventId: String,
+  val deviceCode: String,
+  val reportedEnterpriseId: String?,
   val fleetId: String?,
   val vehicleId: String,
   val driverId: String?,
+  val sessionId: Long?,
+  val configVersion: String?,
   val eventTimeUtc: String,
   val fatigueScore: Double,
   val distractionScore: Double,

@@ -16,6 +16,7 @@ import androidx.work.WorkManager;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
 
+import com.driveedge.app.edge.EdgeContextStore;
 import com.driveedge.storage.EdgeEventRow;
 import com.driveedge.storage.StorageCenter;
 import com.driveedge.storage.UploadAttemptResult;
@@ -47,9 +48,13 @@ public final class EdgeEventUploadWorker extends Worker {
     Context appContext = getApplicationContext();
     EdgeEventReporter.ReporterQueueStore store = EdgeEventReporter.createQueueStore(appContext);
     StorageCenter storageCenter = EdgeEventReporter.createStorageCenter(store);
-    EventUploader eventUploader = EdgeEventReporter.createEventUploader();
+    EdgeContextStore contextStore = new EdgeContextStore(appContext);
+    EventUploader eventUploader = EdgeEventReporter.createEventUploader(appContext, contextStore);
 
     try {
+      if (eventUploader == null) {
+        return Result.success();
+      }
       processUploads(store, storageCenter, eventUploader, appContext);
       return Result.success();
     } catch (Exception error) {

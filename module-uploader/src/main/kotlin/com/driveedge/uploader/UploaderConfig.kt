@@ -6,6 +6,7 @@ data class UploaderConfig
   @JvmOverloads
   constructor(
   val baseUrl: String,
+  val deviceCode: String,
   val deviceToken: String,
   val endpointPath: String = "/api/v1/events",
   val idempotencyHeaderName: String = "Idempotency-Key",
@@ -15,6 +16,7 @@ data class UploaderConfig
 ) {
   init {
     require(baseUrl.isNotBlank()) { "baseUrl must not be blank" }
+    require(deviceCode.isNotBlank()) { "deviceCode must not be blank" }
     require(deviceToken.isNotBlank()) { "deviceToken must not be blank" }
     require(endpointPath.isNotBlank()) { "endpointPath must not be blank" }
     require(idempotencyHeaderName.isNotBlank()) { "idempotencyHeaderName must not be blank" }

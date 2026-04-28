@@ -14,6 +14,7 @@ class EventUploader
       val response =
         transport.postEvent(
           endpointUrl = config.endpointUrl(),
+          deviceCode = config.deviceCode,
           deviceToken = config.deviceToken,
           eventId = event.eventId,
           idempotencyHeaderName = config.idempotencyHeaderName,
@@ -90,14 +91,26 @@ private object EventPayloadMapper {
   fun toJson(event: EdgeEvent): String {
     val fields = linkedMapOf<String, String>()
     fields["eventId"] = event.eventId.toJsonString()
+    fields["deviceCode"] = event.deviceCode.toJsonString()
     fields["vehicleId"] = event.vehicleId.toJsonString()
     fields["eventTime"] = event.eventTimeUtc.toJsonString()
     fields["fatigueScore"] = event.fatigueScore.toString()
     fields["distractionScore"] = event.distractionScore.toString()
     fields["algorithmVer"] = event.algorithmVer.toJsonString()
 
+    event.reportedEnterpriseId?.let { fields["reportedEnterpriseId"] = it.toJsonString() }
     event.fleetId?.let { fields["fleetId"] = it.toJsonString() }
     event.driverId?.let { fields["driverId"] = it.toJsonString() }
+    event.sessionId?.let { fields["sessionId"] = it.toString() }
+    event.configVersion?.let { fields["configVersion"] = it.toJsonString() }
+    fields["riskLevel"] = event.riskLevel.name.toJsonString()
+    event.dominantRiskType?.let { fields["dominantRiskType"] = it.name.toJsonString() }
+    if (event.triggerReasons.isNotEmpty()) {
+      fields["triggerReasons"] = event.triggerReasons.joinToString(prefix = "[", postfix = "]") { it.name.toJsonString() }
+    }
+    fields["windowStartMs"] = event.windowStartMs.toString()
+    fields["windowEndMs"] = event.windowEndMs.toString()
+    fields["createdAtMs"] = event.createdAtMs.toString()
 
     return buildString {
       append('{')

@@ -18,9 +18,13 @@ class FileEdgeEventStoreTest {
       store.append(
         EdgeEvent(
           eventId = "evt_VEH-1001_20260409081011_0001",
+          deviceCode = "DEV-001",
+          reportedEnterpriseId = "100",
           fleetId = "FLEET-1",
           vehicleId = "VEH-1001",
           driverId = "DRIVER-9",
+          sessionId = 9001L,
+          configVersion = "ruleset/1/1/1",
           eventTimeUtc = "2026-04-09T08:10:11Z",
           fatigueScore = 0.9,
           distractionScore = 0.1,

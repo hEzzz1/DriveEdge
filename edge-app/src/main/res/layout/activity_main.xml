@@ -23,6 +23,79 @@
     android:text="@string/status_local_boot"
     android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
 
+  <TextView
+    android:id="@+id/edgeContextView"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="8dp"
+    android:text="@string/edge_context_empty"
+    android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="8dp"
+    android:orientation="horizontal">
+
+    <EditText
+      android:id="@+id/driverCodeInput"
+      android:layout_width="0dp"
+      android:layout_height="wrap_content"
+      android:layout_weight="1"
+      android:hint="@string/driver_code_hint"
+      android:inputType="text"
+      android:maxLines="1" />
+
+    <Space
+      android:layout_width="8dp"
+      android:layout_height="1dp" />
+
+    <EditText
+      android:id="@+id/driverPinInput"
+      android:layout_width="0dp"
+      android:layout_height="wrap_content"
+      android:layout_weight="1"
+      android:hint="@string/driver_pin_hint"
+      android:inputType="numberPassword"
+      android:maxLines="1" />
+  </LinearLayout>
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="8dp"
+    android:orientation="horizontal">
+
+    <Button
+      android:id="@+id/syncButton"
+      android:layout_width="0dp"
+      android:layout_height="wrap_content"
+      android:layout_weight="1"
+      android:text="@string/edge_sync" />
+
+    <Space
+      android:layout_width="8dp"
+      android:layout_height="1dp" />
+
+    <Button
+      android:id="@+id/signInButton"
+      android:layout_width="0dp"
+      android:layout_height="wrap_content"
+      android:layout_weight="1"
+      android:text="@string/driver_sign_in" />
+
+    <Space
+      android:layout_width="8dp"
+      android:layout_height="1dp" />
+
+    <Button
+      android:id="@+id/signOutButton"
+      android:layout_width="0dp"
+      android:layout_height="wrap_content"
+      android:layout_weight="1"
+      android:text="@string/driver_sign_out" />
+  </LinearLayout>
+
   <TextureView
     android:id="@+id/previewView"
     android:layout_width="match_parent"

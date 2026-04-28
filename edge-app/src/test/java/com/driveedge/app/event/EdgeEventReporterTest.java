@@ -60,7 +60,7 @@ public final class EdgeEventReporterTest {
       awaitCondition(() -> store.countQueuedEvents(System.currentTimeMillis()) == 3, "expected offline queue buildup");
 
       assertEquals(0, transport.callCount.get());
-      assertTrue(harness.statusLines.get(harness.statusLines.size() - 1).contains("等待网络恢复"));
+      assertTrue(harness.statusLines.stream().anyMatch(line -> line.contains("等待网络恢复")));
     } finally {
       harness.close();
     }
@@ -141,8 +141,8 @@ public final class EdgeEventReporterTest {
     StorageCenter storageCenter = new StorageCenter(store, store, storageConfig, Clock.systemUTC());
     EdgeEventStore eventStore = event -> storageCenter.onEdgeEvent(event, System.currentTimeMillis());
     EventCenter eventCenter =
-      new EventCenter(new EventCenterConfig("VEH-001", "fleet-01", "drv-01", "algo-v1", 0L), eventStore);
-    EventUploader uploader = new EventUploader(new UploaderConfig(TEST_SERVER_BASE_URL, "token-001"), transport);
+      new EventCenter(new EventCenterConfig("DEV-001", "VEH-001", null, "fleet-01", "drv-01", null, null, "algo-v1", 0L), eventStore);
+    EventUploader uploader = new EventUploader(new UploaderConfig(TEST_SERVER_BASE_URL, "DEV-001", "token-001"), transport);
     ExecutorService uploadExecutor = Executors.newSingleThreadExecutor();
     ScheduledExecutorService retryScheduler = Executors.newSingleThreadScheduledExecutor();
     List<String> statusLines = Collections.synchronizedList(new ArrayList<>());
@@ -182,9 +182,13 @@ public final class EdgeEventReporterTest {
   private static EdgeEvent edgeEvent(String eventId, long createdAtMs) {
     return new EdgeEvent(
       eventId,
+      "DEV-001",
+      null,
       "fleet-01",
       "VEH-001",
       "drv-01",
+      null,
+      null,
       "2026-04-25T10:00:00Z",
       0.10,
       0.91,
@@ -246,6 +250,7 @@ public final class EdgeEventReporterTest {
     @Override
     public TransportResponse postEvent(
       String endpointUrl,
+      String deviceCode,
       String deviceToken,
       String eventId,
       String idempotencyHeaderName,

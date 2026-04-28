@@ -10,8 +10,12 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.driveedge.app.BuildConfig;
+import com.driveedge.app.edge.EdgeContextStore;
+import com.driveedge.app.edge.EdgeLocalContext;
 import com.driveedge.app.fatigue.LocalFatigueAnalyzer;
+import com.driveedge.event.center.EventDebouncer;
 import com.driveedge.event.center.EdgeEvent;
+import com.driveedge.event.center.EventIdGenerator;
 import com.driveedge.event.center.EdgeEventStore;
 import com.driveedge.event.center.EventCenter;
 import com.driveedge.event.center.EventCenterConfig;
@@ -62,12 +66,16 @@ public final class EdgeEventReporter implements AutoCloseable {
   private final Context appContext;
   @NonNull
   private final ReporterQueueStore queueStore;
+  @Nullable
+  private final EdgeContextStore edgeContextStore;
   @NonNull
   private final StorageCenter storageCenter;
   @NonNull
-  private final EventCenter eventCenter;
-  @NonNull
-  private final EventUploader eventUploader;
+  private final EventDebouncer eventDebouncer;
+  @Nullable
+  private final EventCenter injectedEventCenter;
+  @Nullable
+  private final EventUploader injectedEventUploader;
   @NonNull
   private final ExecutorService uploadExecutor;
   @NonNull
@@ -100,28 +108,7 @@ public final class EdgeEventReporter implements AutoCloseable {
       updateStatus("事件上报：本地队列初始化失败，已切换内存队列");
     }
     StorageCenter storageCenter = new StorageCenter(store, store, new StorageConfig(), Clock.systemUTC());
-    EdgeEventStore eventStore = event -> storageCenter.onEdgeEvent(event, System.currentTimeMillis());
-    EventCenter eventCenter = new EventCenter(
-      new EventCenterConfig(
-        BuildConfig.EDGE_VEHICLE_ID,
-        BuildConfig.EDGE_FLEET_ID,
-        BuildConfig.EDGE_DRIVER_ID,
-        BuildConfig.EDGE_ALGORITHM_VERSION,
-        8_000L
-      ),
-      eventStore
-    );
-    EventUploader eventUploader = new EventUploader(
-      new UploaderConfig(
-        BuildConfig.EDGE_SERVER_BASE_URL,
-        BuildConfig.EDGE_DEVICE_TOKEN,
-        "/api/v1/events",
-        "Idempotency-Key",
-        "X-Event-Id",
-        Duration.ofSeconds(5),
-        Duration.ofSeconds(8)
-      )
-    );
+    EdgeContextStore edgeContextStore = new EdgeContextStore(appContext);
 
     ConnectivityManager manager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
     ConnectivityManager.NetworkCallback callback = null;
@@ -141,9 +128,11 @@ public final class EdgeEventReporter implements AutoCloseable {
     }
     this.appContext = appContext;
     this.queueStore = store;
+    this.edgeContextStore = edgeContextStore;
     this.storageCenter = storageCenter;
-    this.eventCenter = eventCenter;
-    this.eventUploader = eventUploader;
+    this.eventDebouncer = new EventDebouncer(8_000L);
+    this.injectedEventCenter = null;
+    this.injectedEventUploader = null;
     this.uploadExecutor = Executors.newSingleThreadExecutor();
     this.retryScheduler = Executors.newSingleThreadScheduledExecutor();
     this.statusListener = statusListener;
@@ -167,9 +156,37 @@ public final class EdgeEventReporter implements AutoCloseable {
   ) {
     this.appContext = null;
     this.queueStore = queueStore;
+    this.edgeContextStore = null;
     this.storageCenter = storageCenter;
-    this.eventCenter = eventCenter;
-    this.eventUploader = eventUploader;
+    this.eventDebouncer = new EventDebouncer(8_000L);
+    this.injectedEventCenter = eventCenter;
+    this.injectedEventUploader = eventUploader;
+    this.statusListener = statusListener;
+    this.networkChecker = networkChecker;
+    this.connectivityManager = null;
+    this.networkCallback = null;
+    this.uploadExecutor = uploadExecutor;
+    this.retryScheduler = retryScheduler;
+    this.directUploadMode = true;
+    pumpUploads();
+  }
+
+  EdgeEventReporter(
+    @NonNull ReporterQueueStore queueStore,
+    @NonNull StorageCenter storageCenter,
+    @NonNull EventDebouncer eventDebouncer,
+    @NonNull ExecutorService uploadExecutor,
+    @NonNull ScheduledExecutorService retryScheduler,
+    @NonNull StatusListener statusListener,
+    @NonNull BooleanSupplier networkChecker
+  ) {
+    this.appContext = null;
+    this.queueStore = queueStore;
+    this.edgeContextStore = null;
+    this.storageCenter = storageCenter;
+    this.eventDebouncer = eventDebouncer;
+    this.injectedEventCenter = null;
+    this.injectedEventUploader = null;
     this.statusListener = statusListener;
     this.networkChecker = networkChecker;
     this.connectivityManager = null;
@@ -192,6 +209,11 @@ public final class EdgeEventReporter implements AutoCloseable {
       return;
     }
 
+    EventCenter eventCenter = injectedEventCenter != null ? injectedEventCenter : createEventCenter();
+    if (eventCenter == null) {
+      updateStatus("事件上报：设备上下文未就绪");
+      return;
+    }
     EdgeEvent event = eventCenter.process(candidate);
     if (event == null) {
       updateQueuedStatus("事件上报：窗口内去抖");
@@ -267,6 +289,11 @@ public final class EdgeEventReporter implements AutoCloseable {
         }
 
         for (UploadQueueItem item : batch) {
+          EventUploader eventUploader = injectedEventUploader != null ? injectedEventUploader : createEventUploader(appContext, edgeContextStore);
+          if (eventUploader == null) {
+            updateStatus("事件上报：设备未激活，等待上下文同步");
+            return;
+          }
           UploadReceipt receipt = eventUploader.upload(item.getEvent());
           EdgeEventRow row = storageCenter.onUploadResult(
             new UploadAttemptResult(
@@ -759,9 +786,13 @@ public final class EdgeEventReporter implements AutoCloseable {
       try {
         EdgeEvent event = row.getEvent();
         object.put("eventId", event.getEventId());
+        object.put("deviceCode", event.getDeviceCode());
+        object.put("reportedEnterpriseId", event.getReportedEnterpriseId() == null ? JSONObject.NULL : event.getReportedEnterpriseId());
         object.put("fleetId", event.getFleetId());
         object.put("vehicleId", event.getVehicleId());
         object.put("driverId", event.getDriverId());
+        object.put("sessionId", event.getSessionId() == null ? JSONObject.NULL : event.getSessionId());
+        object.put("configVersion", event.getConfigVersion() == null ? JSONObject.NULL : event.getConfigVersion());
         object.put("eventTimeUtc", event.getEventTimeUtc());
         object.put("fatigueScore", event.getFatigueScore());
         object.put("distractionScore", event.getDistractionScore());
@@ -826,9 +857,13 @@ public final class EdgeEventReporter implements AutoCloseable {
       }
       EdgeEvent event = new EdgeEvent(
         object.optString("eventId", ""),
+        object.optString("deviceCode", BuildConfig.EDGE_DEVICE_CODE),
+        object.isNull("reportedEnterpriseId") ? null : object.optString("reportedEnterpriseId", null),
         object.isNull("fleetId") ? null : object.optString("fleetId", null),
         object.optString("vehicleId", ""),
         object.isNull("driverId") ? null : object.optString("driverId", null),
+        object.isNull("sessionId") ? null : object.optLong("sessionId"),
+        object.isNull("configVersion") ? null : object.optString("configVersion", null),
         object.optString("eventTimeUtc", ""),
         object.optDouble("fatigueScore", 0.0),
         object.optDouble("distractionScore", 0.0),
@@ -920,12 +955,32 @@ public final class EdgeEventReporter implements AutoCloseable {
     return new StorageCenter(store, store, new StorageConfig(), Clock.systemUTC());
   }
 
-  @NonNull
+  @Nullable
   static EventUploader createEventUploader() {
+    return createEventUploader(null, null);
+  }
+
+  @Nullable
+  static EventUploader createEventUploader(@Nullable Context context, @Nullable EdgeContextStore contextStore) {
+    EdgeLocalContext localContext = contextStore == null ? null : contextStore.load();
+    String deviceCode = firstNonBlankStatic(
+      localContext == null ? null : localContext.deviceCode,
+      BuildConfig.EDGE_DEVICE_CODE,
+      null
+    );
+    String deviceToken = firstNonBlankStatic(
+      localContext == null ? null : localContext.deviceToken,
+      BuildConfig.EDGE_DEVICE_TOKEN,
+      null
+    );
+    if (isBlankStatic(deviceCode) || isBlankStatic(deviceToken)) {
+      return null;
+    }
     return new EventUploader(
       new UploaderConfig(
         BuildConfig.EDGE_SERVER_BASE_URL,
-        BuildConfig.EDGE_DEVICE_TOKEN,
+        deviceCode,
+        deviceToken,
         "/api/v1/events",
         "Idempotency-Key",
         "X-Event-Id",
@@ -933,5 +988,49 @@ public final class EdgeEventReporter implements AutoCloseable {
         Duration.ofSeconds(8)
       )
     );
+  }
+
+  @Nullable
+  private EventCenter createEventCenter() {
+    EdgeContextStore store = edgeContextStore;
+    if (store == null) {
+      return null;
+    }
+    EdgeLocalContext context = store.load();
+    if (!context.hasVehicleBinding() || isBlank(context.deviceCode)) {
+      return null;
+    }
+    EdgeEventStore eventStore = event -> storageCenter.onEdgeEvent(event, System.currentTimeMillis());
+    return new EventCenter(
+      new EventCenterConfig(
+        context.deviceCode,
+        String.valueOf(context.vehicleId),
+        context.enterpriseId == null ? null : String.valueOf(context.enterpriseId),
+        context.fleetId == null ? null : String.valueOf(context.fleetId),
+        context.driverId == null ? null : String.valueOf(context.driverId),
+        context.sessionId,
+        context.configVersion,
+        BuildConfig.EDGE_ALGORITHM_VERSION,
+        8_000L
+      ),
+      eventStore,
+      new EventIdGenerator(String.valueOf(context.vehicleId)),
+      eventDebouncer
+    );
+  }
+
+  @Nullable
+  private static String firstNonBlankStatic(@Nullable String first, @Nullable String second, @Nullable String fallback) {
+    if (!isBlankStatic(first)) {
+      return first;
+    }
+    if (!isBlankStatic(second)) {
+      return second;
+    }
+    return fallback;
+  }
+
+  private static boolean isBlankStatic(@Nullable String value) {
+    return value == null || value.trim().isEmpty();
   }
 }

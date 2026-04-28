@@ -169,9 +169,13 @@ class StorageCenterTest {
   ): EdgeEvent =
     EdgeEvent(
       eventId = eventId,
+      deviceCode = "DEV-001",
+      reportedEnterpriseId = "100",
       fleetId = "fleet-1",
       vehicleId = "veh-1",
       driverId = "driver-1",
+      sessionId = 9001L,
+      configVersion = "ruleset/1/1/1",
       eventTimeUtc = "2026-04-09T10:00:00Z",
       fatigueScore = 0.81,
       distractionScore = 0.22,

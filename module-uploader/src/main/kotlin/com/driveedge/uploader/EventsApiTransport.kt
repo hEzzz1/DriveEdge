@@ -9,6 +9,7 @@ import java.time.Duration
 interface EventsApiTransport {
   fun postEvent(
     endpointUrl: String,
+    deviceCode: String,
     deviceToken: String,
     eventId: String,
     idempotencyHeaderName: String,
@@ -34,6 +35,7 @@ class HttpEventsApiTransport(
 ) : EventsApiTransport {
   override fun postEvent(
     endpointUrl: String,
+    deviceCode: String,
     deviceToken: String,
     eventId: String,
     idempotencyHeaderName: String,
@@ -50,6 +52,7 @@ class HttpEventsApiTransport(
       connection.instanceFollowRedirects = true
       connection.setRequestProperty("Content-Type", "application/json")
       connection.setRequestProperty("Accept", "application/json")
+      connection.setRequestProperty("X-Device-Code", deviceCode)
       connection.setRequestProperty("X-Device-Token", deviceToken)
       connection.setRequestProperty(idempotencyHeaderName, eventId)
       connection.setRequestProperty(eventIdHeaderName, eventId)

@@ -11,6 +11,18 @@
   <string name="recording_stopped">录制完成：%1$s</string>
   <string name="recording_failed">录制失败</string>
   <string name="open_recordings_fallback">无法直接打开目录，请手动查看：%1$s</string>
+  <string name="edge_sync">刷新上下文</string>
+  <string name="driver_sign_in">司机签到</string>
+  <string name="driver_sign_out">司机签退</string>
+  <string name="driver_code_hint">driverCode</string>
+  <string name="driver_pin_hint">PIN</string>
+  <string name="edge_context_empty">上下文：初始化中</string>
+  <string name="edge_context_format">企业：%1$s\n车队：%2$s\n车辆：%3$s\n司机：%4$s\n会话开始：%5$s\n配置版本：%6$s\n上次同步：%7$s\n上报状态：%8$s</string>
+  <string name="edge_sync_failed">上下文同步失败：%1$s</string>
+  <string name="edge_sign_in_failed">司机签到失败：%1$s</string>
+  <string name="edge_sign_out_failed">司机签退失败：%1$s</string>
+  <string name="edge_missing_driver_code">请输入 driverCode</string>
+  <string name="edge_missing_driver_pin">请输入 PIN</string>
 
   <string name="status_idle">状态：未启动</string>
   <string name="status_connected">状态：服务已连接，等待帧回调</string>

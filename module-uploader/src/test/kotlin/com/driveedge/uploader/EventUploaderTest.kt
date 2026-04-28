@@ -26,7 +26,7 @@ class EventUploaderTest {
       )
     val uploader =
       EventUploader(
-        config = UploaderConfig(baseUrl = "https://driveserver.local/", deviceToken = "token-001"),
+        config = UploaderConfig(baseUrl = "https://driveserver.local/", deviceCode = "DEV-001", deviceToken = "token-001"),
         transport = transport,
       )
 
@@ -60,7 +60,7 @@ class EventUploaderTest {
       )
     val uploader =
       EventUploader(
-        config = UploaderConfig(baseUrl = "https://driveserver.local", deviceToken = "token-001"),
+        config = UploaderConfig(baseUrl = "https://driveserver.local", deviceCode = "DEV-001", deviceToken = "token-001"),
         transport = transport,
       )
 
@@ -88,6 +88,7 @@ class EventUploaderTest {
         config =
           UploaderConfig(
             baseUrl = "https://driveserver.local",
+            deviceCode = "DEV-001",
             deviceToken = "token-001",
             requestTimeout = Duration.ofSeconds(2),
           ),
@@ -123,8 +124,8 @@ class EventUploaderTest {
           ),
       )
 
-    val clientReceipt = EventUploader(UploaderConfig("https://driveserver.local", "token-001"), clientTransport).upload(sampleEvent())
-    val serverReceipt = EventUploader(UploaderConfig("https://driveserver.local", "token-001"), serverTransport).upload(sampleEvent())
+    val clientReceipt = EventUploader(UploaderConfig("https://driveserver.local", "DEV-001", "token-001"), clientTransport).upload(sampleEvent())
+    val serverReceipt = EventUploader(UploaderConfig("https://driveserver.local", "DEV-001", "token-001"), serverTransport).upload(sampleEvent())
 
     assertEquals(UploadFailureCategory.CLIENT, clientReceipt.failureCategory)
     assertEquals(UploadFailureCategory.SERVER, serverReceipt.failureCategory)
@@ -133,9 +134,13 @@ class EventUploaderTest {
   private fun sampleEvent(): EdgeEvent =
     EdgeEvent(
       eventId = "evt-1001",
+      deviceCode = "DEV-001",
+      reportedEnterpriseId = "100",
       fleetId = "fleet-001",
       vehicleId = "VEH-1001",
       driverId = "DRV-88",
+      sessionId = 9001L,
+      configVersion = "ruleset/1/1/1",
       eventTimeUtc = "2026-04-09T11:20:30Z",
       fatigueScore = 0.82,
       distractionScore = 0.31,
@@ -174,6 +179,7 @@ class EventUploaderTest {
 
     override fun postEvent(
       endpointUrl: String,
+      deviceCode: String,
       deviceToken: String,
       eventId: String,
       idempotencyHeaderName: String,

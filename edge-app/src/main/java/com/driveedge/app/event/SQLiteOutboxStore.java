@@ -28,7 +28,7 @@ import java.util.Set;
 
 final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventReporter.ReporterQueueStore {
   private static final String DB_NAME = "driveedge_outbox.db";
-  private static final int DB_VERSION = 1;
+  private static final int DB_VERSION = 2;
 
   private static final String TABLE_OUTBOX = "edge_event_outbox";
   private static final String TABLE_DEVICE_CONFIG = "device_config";
@@ -42,9 +42,13 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
     db.execSQL(
       "CREATE TABLE IF NOT EXISTS " + TABLE_OUTBOX + " ("
         + "event_id TEXT PRIMARY KEY NOT NULL,"
+        + "device_code TEXT NOT NULL,"
+        + "reported_enterprise_id TEXT,"
         + "fleet_id TEXT,"
         + "vehicle_id TEXT NOT NULL,"
         + "driver_id TEXT,"
+        + "session_id INTEGER,"
+        + "config_version TEXT,"
         + "event_time_utc TEXT NOT NULL,"
         + "fatigue_score REAL NOT NULL,"
         + "distraction_score REAL NOT NULL,"
@@ -85,7 +89,12 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
 
   @Override
   public void onUpgrade(@NonNull SQLiteDatabase db, int oldVersion, int newVersion) {
-    // No-op for v1.
+    if (oldVersion < 2) {
+      addColumnIfMissing(db, "ALTER TABLE " + TABLE_OUTBOX + " ADD COLUMN device_code TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "ALTER TABLE " + TABLE_OUTBOX + " ADD COLUMN reported_enterprise_id TEXT");
+      addColumnIfMissing(db, "ALTER TABLE " + TABLE_OUTBOX + " ADD COLUMN session_id INTEGER");
+      addColumnIfMissing(db, "ALTER TABLE " + TABLE_OUTBOX + " ADD COLUMN config_version TEXT");
+    }
   }
 
   @Override
@@ -250,9 +259,17 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
     EdgeEvent event = row.getEvent();
     ContentValues values = new ContentValues();
     values.put("event_id", row.getEventId());
+    values.put("device_code", event.getDeviceCode());
+    values.put("reported_enterprise_id", event.getReportedEnterpriseId());
     values.put("fleet_id", event.getFleetId());
     values.put("vehicle_id", event.getVehicleId());
     values.put("driver_id", event.getDriverId());
+    if (event.getSessionId() == null) {
+      values.putNull("session_id");
+    } else {
+      values.put("session_id", event.getSessionId());
+    }
+    values.put("config_version", event.getConfigVersion());
     values.put("event_time_utc", event.getEventTimeUtc());
     values.put("fatigue_score", event.getFatigueScore());
     values.put("distraction_score", event.getDistractionScore());
@@ -326,9 +343,13 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
     EdgeEvent event =
       new EdgeEvent(
         requiredString(cursor, "event_id"),
+        requiredString(cursor, "device_code"),
+        nullableString(cursor, "reported_enterprise_id"),
         nullableString(cursor, "fleet_id"),
         requiredString(cursor, "vehicle_id"),
         nullableString(cursor, "driver_id"),
+        cursor.isNull(column(cursor, "session_id")) ? null : cursor.getLong(column(cursor, "session_id")),
+        nullableString(cursor, "config_version"),
         requiredString(cursor, "event_time_utc"),
         cursor.getDouble(column(cursor, "fatigue_score")),
         cursor.getDouble(column(cursor, "distraction_score")),
@@ -383,6 +404,13 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
     } catch (JSONException ignored) {
     }
     return triggerReasons;
+  }
+
+  private void addColumnIfMissing(@NonNull SQLiteDatabase db, @NonNull String sql) {
+    try {
+      db.execSQL(sql);
+    } catch (Exception ignored) {
+    }
   }
 
   @NonNull

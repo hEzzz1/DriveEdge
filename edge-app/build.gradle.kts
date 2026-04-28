@@ -31,10 +31,9 @@ android {
     targetSdk = 34
     versionCode = 1
     versionName = "0.1.0"
+    buildConfigField("String", "EDGE_DEVICE_CODE", "\"DEV-EDGE-001\"")
+    buildConfigField("String", "EDGE_ACTIVATION_CODE", "\"123456\"")
     buildConfigField("String", "EDGE_DEVICE_TOKEN", "\"dev-device-token\"")
-    buildConfigField("String", "EDGE_FLEET_ID", "\"fleet_01\"")
-    buildConfigField("String", "EDGE_VEHICLE_ID", "\"veh_001\"")
-    buildConfigField("String", "EDGE_DRIVER_ID", "\"drv_001\"")
     buildConfigField("String", "EDGE_ALGORITHM_VERSION", "\"local-fatigue-v1\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -86,6 +85,7 @@ dependencies {
   implementation("com.google.android.material:material:1.12.0")
   implementation("androidx.activity:activity:1.9.1")
   implementation("androidx.lifecycle:lifecycle-service:2.8.4")
+  implementation("androidx.security:security-crypto:1.1.0-alpha06")
   implementation("androidx.work:work-runtime:2.9.1")
   implementation("io.github.crow-misia.libyuv:libyuv-android:0.43.2")
   implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")

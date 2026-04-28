@@ -28,9 +28,13 @@ class EventCenter
     val event =
       EdgeEvent(
         eventId = eventIdGenerator.next(eventTimeMs),
+        deviceCode = config.deviceCode,
+        reportedEnterpriseId = config.enterpriseId,
         fleetId = config.fleetId,
         vehicleId = config.vehicleId,
         driverId = config.driverId,
+        sessionId = config.sessionId,
+        configVersion = config.configVersion,
         eventTimeUtc = Instant.ofEpochMilli(eventTimeMs).toString(),
         fatigueScore = candidate.fatigueScore.coerceIn(0.0, 1.0),
         distractionScore = candidate.distractionScore.coerceIn(0.0, 1.0),
