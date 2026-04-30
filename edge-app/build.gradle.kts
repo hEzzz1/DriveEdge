@@ -31,9 +31,6 @@ android {
     targetSdk = 34
     versionCode = 1
     versionName = "0.1.0"
-    buildConfigField("String", "EDGE_DEVICE_CODE", "\"DEV-EDGE-001\"")
-    buildConfigField("String", "EDGE_ACTIVATION_CODE", "\"123456\"")
-    buildConfigField("String", "EDGE_DEVICE_TOKEN", "\"dev-device-token\"")
     buildConfigField("String", "EDGE_ALGORITHM_VERSION", "\"local-fatigue-v1\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -49,7 +46,7 @@ android {
     val hostlocalServerBaseUrl =
       providers.gradleProperty("edgeHostlocalServerBaseUrl")
         .orElse(providers.provider { localProperty("edgeHostlocalServerBaseUrl") })
-        .orElse("http://127.0.0.1:8080")
+        .orElse("http://47.109.51.105")
         .get()
 
     create("simulator") {
@@ -98,4 +95,5 @@ dependencies {
   implementation(project(":module-uploader"))
   testImplementation(kotlin("test"))
   testImplementation("junit:junit:4.13.2")
+  testImplementation("org.json:json:20240303")
 }

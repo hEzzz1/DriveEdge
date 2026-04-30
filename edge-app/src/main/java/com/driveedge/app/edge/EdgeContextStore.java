@@ -77,12 +77,24 @@ public final class EdgeContextStore {
       json.put("fleetName", context.fleetName);
       json.put("vehicleId", context.vehicleId);
       json.put("vehiclePlateNumber", context.vehiclePlateNumber);
+      json.put("effectiveStage", context.effectiveStage);
+      json.put("bindRequestId", context.bindRequestId);
+      json.put("bindRequestEnterpriseId", context.bindRequestEnterpriseId);
+      json.put("bindRequestEnterpriseName", context.bindRequestEnterpriseName);
+      json.put("bindRequestCodeMasked", context.bindRequestCodeMasked);
+      json.put("bindRequestSource", context.bindRequestSource);
+      json.put("bindRequestStatus", context.bindRequestStatus);
+      json.put("bindRequestSubmittedAt", context.bindRequestSubmittedAt);
+      json.put("bindRequestReviewedAt", context.bindRequestReviewedAt);
+      json.put("bindRequestApproveRemark", context.bindRequestApproveRemark);
+      json.put("bindRequestRejectReason", context.bindRequestRejectReason);
+      json.put("bindRequestExpiresAt", context.bindRequestExpiresAt);
       json.put("driverId", context.driverId);
       json.put("driverCode", context.driverCode);
       json.put("driverName", context.driverName);
       json.put("sessionId", context.sessionId);
       json.put("sessionNo", context.sessionNo);
-      json.put("sessionStatus", context.sessionStatus == null ? JSONObject.NULL : context.sessionStatus.intValue());
+      json.put("sessionStage", context.sessionStage);
       json.put("configVersion", context.configVersion);
       json.put("signedInAt", context.signedInAt);
       json.put("lastSyncAt", context.lastSyncAt);
@@ -98,6 +110,7 @@ public final class EdgeContextStore {
     context.deviceId = readLong(json, "deviceId");
     context.deviceCode = readString(json, "deviceCode");
     context.deviceName = readString(json, "deviceName");
+    context.activationCode = readString(json, "activationCode");
     context.deviceToken = readString(json, "deviceToken");
     context.enterpriseId = readLong(json, "enterpriseId");
     context.enterpriseName = readString(json, "enterpriseName");
@@ -105,18 +118,66 @@ public final class EdgeContextStore {
     context.fleetName = readString(json, "fleetName");
     context.vehicleId = readLong(json, "vehicleId");
     context.vehiclePlateNumber = readString(json, "vehiclePlateNumber");
+    context.effectiveStage = readString(json, "effectiveStage");
+    context.bindRequestId = readLong(json, "bindRequestId");
+    context.bindRequestEnterpriseId = readLong(json, "bindRequestEnterpriseId");
+    context.bindRequestEnterpriseName = readString(json, "bindRequestEnterpriseName");
+    context.bindRequestCodeMasked = readString(json, "bindRequestCodeMasked");
+    context.bindRequestSource = readString(json, "bindRequestSource");
+    context.bindRequestStatus = readString(json, "bindRequestStatus");
+    context.bindRequestSubmittedAt = readString(json, "bindRequestSubmittedAt");
+    context.bindRequestReviewedAt = readString(json, "bindRequestReviewedAt");
+    context.bindRequestApproveRemark = readString(json, "bindRequestApproveRemark");
+    context.bindRequestRejectReason = readString(json, "bindRequestRejectReason");
+    context.bindRequestExpiresAt = readString(json, "bindRequestExpiresAt");
     context.driverId = readLong(json, "driverId");
     context.driverCode = readString(json, "driverCode");
     context.driverName = readString(json, "driverName");
     context.sessionId = readLong(json, "sessionId");
-    Integer sessionStatus = readInt(json, "sessionStatus");
-    context.sessionStatus = sessionStatus == null ? null : sessionStatus.byteValue();
     context.sessionNo = readString(json, "sessionNo");
+    context.sessionStage = readString(json, "sessionStage");
     context.configVersion = readString(json, "configVersion");
     context.signedInAt = readString(json, "signedInAt");
     context.lastSyncAt = readString(json, "lastSyncAt");
     context.sessionClosedReason = readString(json, "sessionClosedReason");
+    migrateLegacyFields(json, context);
     return context;
+  }
+
+  private void migrateLegacyFields(@NonNull JSONObject json, @NonNull EdgeLocalContext context) {
+    if (context.bindRequestStatus == null) {
+      context.bindRequestStatus = readString(json, "bindStatus");
+    }
+    if (context.bindRequestEnterpriseName == null) {
+      context.bindRequestEnterpriseName = readString(json, "bindEnterpriseName");
+    }
+    if (context.bindRequestCodeMasked == null) {
+      context.bindRequestCodeMasked = readString(json, "bindCodeMasked");
+    }
+    if (context.bindRequestSource == null) {
+      context.bindRequestSource = readString(json, "bindSource");
+    }
+    if (context.bindRequestEnterpriseId == null) {
+      String legacyEnterpriseCode = readString(json, "bindEnterpriseCode");
+      if (legacyEnterpriseCode != null) {
+        try {
+          context.bindRequestEnterpriseId = Long.parseLong(legacyEnterpriseCode);
+        } catch (NumberFormatException ignored) {
+        }
+      }
+    }
+    if (context.bindRequestSubmittedAt == null) {
+      context.bindRequestSubmittedAt = readString(json, "bindAppliedAt");
+    }
+    if (context.bindRequestRejectReason == null) {
+      context.bindRequestRejectReason = readString(json, "bindRejectedReason");
+    }
+    if (context.sessionStage == null) {
+      Integer legacySessionStatus = readInt(json, "sessionStatus");
+      if (legacySessionStatus != null && legacySessionStatus == 1) {
+        context.sessionStage = "ACTIVE";
+      }
+    }
   }
 
   private Long readLong(@NonNull JSONObject json, @NonNull String key) {

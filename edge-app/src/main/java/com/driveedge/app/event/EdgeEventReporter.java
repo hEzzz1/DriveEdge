@@ -857,7 +857,7 @@ public final class EdgeEventReporter implements AutoCloseable {
       }
       EdgeEvent event = new EdgeEvent(
         object.optString("eventId", ""),
-        object.optString("deviceCode", BuildConfig.EDGE_DEVICE_CODE),
+        object.optString("deviceCode", ""),
         object.isNull("reportedEnterpriseId") ? null : object.optString("reportedEnterpriseId", null),
         object.isNull("fleetId") ? null : object.optString("fleetId", null),
         object.optString("vehicleId", ""),
@@ -965,12 +965,12 @@ public final class EdgeEventReporter implements AutoCloseable {
     EdgeLocalContext localContext = contextStore == null ? null : contextStore.load();
     String deviceCode = firstNonBlankStatic(
       localContext == null ? null : localContext.deviceCode,
-      BuildConfig.EDGE_DEVICE_CODE,
+      null,
       null
     );
     String deviceToken = firstNonBlankStatic(
       localContext == null ? null : localContext.deviceToken,
-      BuildConfig.EDGE_DEVICE_TOKEN,
+      null,
       null
     );
     if (isBlankStatic(deviceCode) || isBlankStatic(deviceToken)) {

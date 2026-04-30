@@ -43,7 +43,6 @@ import android.util.Size;
 import android.view.Surface;
 import android.view.TextureView;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -57,8 +56,8 @@ import androidx.core.content.ContextCompat;
 import com.driveedge.app.R;
 import com.driveedge.app.camera.FrameData;
 import com.driveedge.app.edge.EdgeApiClient;
-import com.driveedge.app.edge.EdgeApiException;
 import com.driveedge.app.edge.EdgeContextStore;
+import com.driveedge.app.edge.EdgeFlowController;
 import com.driveedge.app.edge.EdgeLocalContext;
 import com.driveedge.app.event.EdgeEventReporter;
 import com.driveedge.app.fatigue.LocalDistractionAnalyzer;
@@ -107,7 +106,6 @@ public final class MainActivity extends AppCompatActivity {
   private static final int REPLAY_JPEG_QUALITY = 92;
   private static final int DEFAULT_RECORD_WIDTH = 1280;
   private static final int DEFAULT_RECORD_HEIGHT = 720;
-  private static final int EDGE_UNAUTHORIZED_CODE = 40101;
   private static final String LOCAL_MODEL_ASSET_PATH = "models/yolov8face.onnx";
   private static final String LOCAL_FATIGUE_MODEL_ASSET_PATH = "models/face_landmarker.task";
   private static final float LOCAL_CONF_THRESHOLD = 0.25f;
@@ -163,14 +161,11 @@ public final class MainActivity extends AppCompatActivity {
   private TextView statusView;
   private TextView fatigueStatusView;
   private TextView edgeContextView;
-  private EditText driverCodeInput;
-  private EditText driverPinInput;
   private Button startButton;
   private Button stopButton;
   private Button recordButton;
   private Button openRecordingsButton;
   private Button syncButton;
-  private Button signInButton;
   private Button signOutButton;
 
   @Nullable
@@ -260,6 +255,8 @@ public final class MainActivity extends AppCompatActivity {
   @NonNull
   private final EdgeApiClient edgeApiClient = new EdgeApiClient();
   @NonNull
+  private final EdgeFlowController edgeFlowController = new EdgeFlowController(edgeApiClient);
+  @NonNull
   private volatile EdgeLocalContext edgeLocalContext = EdgeLocalContext.empty();
   @NonNull
   private volatile String edgeEventStatusLine = "事件上报：待触发";
@@ -332,19 +329,19 @@ public final class MainActivity extends AppCompatActivity {
     statusView = findViewById(R.id.statusView);
     fatigueStatusView = findViewById(R.id.fatigueStatusView);
     edgeContextView = findViewById(R.id.edgeContextView);
-    driverCodeInput = findViewById(R.id.driverCodeInput);
-    driverPinInput = findViewById(R.id.driverPinInput);
     startButton = findViewById(R.id.startButton);
     stopButton = findViewById(R.id.stopButton);
     recordButton = findViewById(R.id.recordButton);
     openRecordingsButton = findViewById(R.id.openRecordingsButton);
     syncButton = findViewById(R.id.syncButton);
-    signInButton = findViewById(R.id.signInButton);
     signOutButton = findViewById(R.id.signOutButton);
 
     cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
     edgeContextStore = new EdgeContextStore(getApplicationContext());
     edgeLocalContext = edgeContextStore.load();
+    if (EdgeRoutes.routeIfNeeded(this, edgeFlowController, edgeLocalContext, MainActivity.class)) {
+      return;
+    }
 
     previewView.setSurfaceTextureListener(surfaceTextureListener);
     startButton.setOnClickListener(v -> ensurePermissionThenStart());
@@ -352,7 +349,6 @@ public final class MainActivity extends AppCompatActivity {
     recordButton.setOnClickListener(v -> toggleRecording());
     openRecordingsButton.setOnClickListener(v -> openRecordingsDirectory());
     syncButton.setOnClickListener(v -> refreshEdgeContext(false));
-    signInButton.setOnClickListener(v -> signInDriver());
     signOutButton.setOnClickListener(v -> signOutDriver());
 
     startButton.setEnabled(false);
@@ -390,7 +386,8 @@ public final class MainActivity extends AppCompatActivity {
 
   private void ensurePermissionThenStart() {
     if (!edgeLocalContext.hasActiveSession()) {
-      Toast.makeText(this, "当前无有效司机会话", Toast.LENGTH_SHORT).show();
+      Toast.makeText(this, R.string.edge_session_required, Toast.LENGTH_SHORT).show();
+      navigateToSignIn();
       return;
     }
     if (!analyzersReady) {
@@ -453,72 +450,24 @@ public final class MainActivity extends AppCompatActivity {
         return;
       }
       try {
-        EdgeLocalContext updated = syncEdgeContext(store.load());
+        EdgeLocalContext updated = edgeFlowController.syncContext(store.load());
         store.save(updated);
         edgeLocalContext = updated;
-        runOnUiThread(this::renderEdgeContext);
+        runOnUiThread(() -> {
+          if (EdgeRoutes.routeIfNeeded(this, edgeFlowController, updated, MainActivity.class)) {
+            return;
+          }
+          renderEdgeContext();
+        });
       } catch (Exception error) {
         if (!silentFailure) {
           runOnUiThread(() -> Toast.makeText(
             this,
-            getString(R.string.edge_sync_failed, formatEdgeError(error)),
+            getString(R.string.edge_sync_failed, edgeFlowController.formatEdgeError(edgeLocalContext, error)),
             Toast.LENGTH_SHORT
           ).show());
         }
         runOnUiThread(this::renderEdgeContext);
-      }
-    });
-  }
-
-  @NonNull
-  private EdgeLocalContext syncEdgeContext(@NonNull EdgeLocalContext cachedContext) throws Exception {
-    EdgeLocalContext baseContext = cachedContext;
-    if (!baseContext.hasDeviceIdentity()) {
-      baseContext = edgeApiClient.activate(baseContext);
-    }
-    try {
-      EdgeLocalContext updated = edgeApiClient.fetchContext(baseContext);
-      return edgeApiClient.fetchCurrentSession(updated);
-    } catch (EdgeApiException error) {
-      if (error.code != EDGE_UNAUTHORIZED_CODE || !cachedContext.hasDeviceIdentity()) {
-        throw error;
-      }
-      EdgeLocalContext reactivated = edgeApiClient.activate(cachedContext);
-      EdgeLocalContext refreshed = edgeApiClient.fetchContext(reactivated);
-      return edgeApiClient.fetchCurrentSession(refreshed);
-    }
-  }
-
-  private void signInDriver() {
-    String driverCode = driverCodeInput.getText() == null ? "" : driverCodeInput.getText().toString().trim();
-    String pin = driverPinInput.getText() == null ? "" : driverPinInput.getText().toString();
-    if (driverCode.isEmpty()) {
-      Toast.makeText(this, R.string.edge_missing_driver_code, Toast.LENGTH_SHORT).show();
-      return;
-    }
-    if (pin.isEmpty()) {
-      Toast.makeText(this, R.string.edge_missing_driver_pin, Toast.LENGTH_SHORT).show();
-      return;
-    }
-    edgeIoExecutor.execute(() -> {
-      EdgeContextStore store = edgeContextStore;
-      if (store == null) {
-        return;
-      }
-      try {
-        EdgeLocalContext updated = edgeApiClient.signIn(store.load(), driverCode, pin);
-        store.save(updated);
-        edgeLocalContext = updated;
-        runOnUiThread(() -> {
-          driverPinInput.setText("");
-          renderEdgeContext();
-        });
-      } catch (Exception error) {
-        runOnUiThread(() -> Toast.makeText(
-          this,
-          getString(R.string.edge_sign_in_failed, formatEdgeError(error)),
-          Toast.LENGTH_SHORT
-        ).show());
       }
     });
   }
@@ -533,11 +482,16 @@ public final class MainActivity extends AppCompatActivity {
         EdgeLocalContext updated = edgeApiClient.signOut(store.load(), "MANUAL_SIGN_OUT");
         store.save(updated);
         edgeLocalContext = updated;
-        runOnUiThread(this::renderEdgeContext);
+        runOnUiThread(() -> {
+          if (captureStarted) {
+            stopCapture();
+          }
+          navigateToSignIn();
+        });
       } catch (Exception error) {
         runOnUiThread(() -> Toast.makeText(
           this,
-          getString(R.string.edge_sign_out_failed, formatEdgeError(error)),
+          getString(R.string.edge_sign_out_failed, edgeFlowController.formatEdgeError(edgeLocalContext, error)),
           Toast.LENGTH_SHORT
         ).show());
       }
@@ -549,16 +503,20 @@ public final class MainActivity extends AppCompatActivity {
     if (store != null) {
       edgeLocalContext = store.load();
     }
+    if (EdgeRoutes.routeIfNeeded(this, edgeFlowController, edgeLocalContext, MainActivity.class)) {
+      return;
+    }
     EdgeLocalContext context = edgeLocalContext;
     edgeContextView.setText(getString(
       R.string.edge_context_format,
-      displayValue(context.enterpriseName, context.enterpriseId),
-      displayValue(context.fleetName, context.fleetId),
-      displayValue(context.vehiclePlateNumber, context.vehicleId),
-      displayDriverValue(context),
-      displayText(context.signedInAt),
-      displayText(context.configVersion),
-      displayText(context.lastSyncAt),
+      EdgeFlowController.displayValue(context.enterpriseName, context.enterpriseId),
+      edgeFlowController.displayBindStatus(context),
+      EdgeFlowController.displayValue(context.fleetName, context.fleetId),
+      EdgeFlowController.displayValue(context.vehiclePlateNumber, context.vehicleId),
+      EdgeFlowController.displayDriverValue(context),
+      EdgeFlowController.displayText(context.signedInAt),
+      EdgeFlowController.displayText(context.configVersion),
+      EdgeFlowController.displayText(context.lastSyncAt),
       edgeEventStatusLine
     ));
     updateSessionControls();
@@ -567,42 +525,20 @@ public final class MainActivity extends AppCompatActivity {
   private void updateSessionControls() {
     boolean sessionReady = edgeLocalContext.hasActiveSession();
     startButton.setEnabled(!captureStarted && analyzersReady && sessionReady);
-    signInButton.setEnabled(edgeLocalContext.hasDeviceIdentity() && !sessionReady);
     signOutButton.setEnabled(sessionReady);
     syncButton.setEnabled(true);
   }
 
-  @NonNull
-  private String displayDriverValue(@NonNull EdgeLocalContext context) {
-    if (context.driverName != null && !context.driverName.trim().isEmpty()) {
-      if (context.driverCode != null && !context.driverCode.trim().isEmpty()) {
-        return context.driverName + " (" + context.driverCode + ")";
-      }
-      return context.driverName;
-    }
-    return "-";
-  }
-
-  @NonNull
-  private String displayValue(@Nullable String textValue, @Nullable Long idValue) {
-    if (textValue != null && !textValue.trim().isEmpty()) {
-      return textValue;
-    }
-    return idValue == null ? "-" : String.valueOf(idValue);
-  }
-
-  @NonNull
-  private String displayText(@Nullable String value) {
-    return value == null || value.trim().isEmpty() ? "-" : value;
+  private void navigateToSignIn() {
+    Intent intent = new Intent(this, SignInActivity.class);
+    intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);
+    startActivity(intent);
+    finish();
   }
 
   @NonNull
   private String formatEdgeError(@NonNull Exception error) {
-    if (error instanceof EdgeApiException) {
-      EdgeApiException apiError = (EdgeApiException) error;
-      return apiError.getMessage() == null ? String.valueOf(apiError.code) : apiError.getMessage();
-    }
-    return formatError(error);
+    return edgeFlowController.formatEdgeError(edgeLocalContext, error);
   }
 
   private void stopCapture() {

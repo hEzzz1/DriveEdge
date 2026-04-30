@@ -20,55 +20,64 @@ public final class EdgeApiClient {
   private static final int SUCCESS_CODE = 0;
 
   @NonNull
-  public EdgeLocalContext activate(@NonNull EdgeLocalContext baseContext) throws Exception {
+  public EdgeLocalContext claimDevice(
+    @NonNull EdgeLocalContext baseContext,
+    @NonNull String enterpriseActivationCode,
+    @Nullable String deviceName
+  ) throws Exception {
     JSONObject request = new JSONObject();
-    request.put("deviceCode", BuildConfig.EDGE_DEVICE_CODE);
-    request.put("activationCode", BuildConfig.EDGE_ACTIVATION_CODE);
-    JSONObject data = request("/api/v1/edge/device/activate", "POST", null, null, request);
+    request.put("deviceCode", required(baseContext.deviceCode));
+    if (deviceName != null && !deviceName.trim().isEmpty()) {
+      request.put("deviceName", deviceName.trim());
+    }
+    request.put("enterpriseActivationCode", required(enterpriseActivationCode));
+
+    JSONObject data = request("/api/v1/edge/device/claim", "POST", null, null, request);
     EdgeLocalContext context = baseContext.copy();
-    context.deviceId = readLong(data, "deviceId");
-    context.deviceCode = readString(data, "deviceCode");
-    context.deviceName = readString(data, "deviceName");
-    context.deviceToken = readString(data, "deviceToken");
-    context.enterpriseId = readLong(data, "enterpriseId");
-    context.fleetId = readLong(data, "fleetId");
-    context.vehicleId = readLong(data, "vehicleId");
+    clearContextSnapshot(context);
+    mergeContextPayload(context, data);
     context.lastSyncAt = Instant.now().toString();
     return context;
   }
 
   @NonNull
   public EdgeLocalContext fetchContext(@NonNull EdgeLocalContext baseContext) throws Exception {
-    JSONObject data = request("/api/v1/edge/device/context", "GET", required(baseContext.deviceCode), required(baseContext.deviceToken), null);
+    JSONObject data = request(
+      "/api/v1/edge/device/context",
+      "GET",
+      required(baseContext.deviceCode),
+      required(baseContext.deviceToken),
+      null
+    );
     EdgeLocalContext context = baseContext.copy();
-    context.deviceId = readLong(data, "deviceId");
-    context.deviceCode = readString(data, "deviceCode");
-    context.deviceName = readString(data, "deviceName");
-    context.enterpriseId = readLong(data, "enterpriseId");
-    context.enterpriseName = readString(data, "enterpriseName");
-    context.fleetId = readLong(data, "fleetId");
-    context.fleetName = readString(data, "fleetName");
-    context.vehicleId = readLong(data, "vehicleId");
-    context.vehiclePlateNumber = readString(data, "vehiclePlateNumber");
-    context.driverId = readLong(data, "currentDriverId");
-    context.driverCode = readString(data, "currentDriverCode");
-    context.driverName = readString(data, "currentDriverName");
-    context.sessionId = readLong(data, "currentSessionId");
-    context.sessionNo = readString(data, "currentSessionNo");
-    context.signedInAt = readString(data, "currentSessionSignInTime");
-    Integer sessionStatus = readInt(data, "currentSessionStatus");
-    context.sessionStatus = sessionStatus == null ? null : sessionStatus.byteValue();
-    context.configVersion = readString(data, "configVersion");
+    clearContextSnapshot(context);
+    mergeContextPayload(context, data);
     context.lastSyncAt = Instant.now().toString();
-    if (context.sessionId == null) {
-      context.clearSession();
-    }
     return context;
   }
 
   @NonNull
+  public EdgeLocalContext submitBindRequest(
+    @NonNull EdgeLocalContext baseContext,
+    @Nullable String bindCode,
+    @Nullable String remark
+  ) throws Exception {
+    String enterpriseActivationCode = bindCode == null ? null : bindCode.trim();
+    if (enterpriseActivationCode == null || enterpriseActivationCode.isEmpty()) {
+      throw new IllegalStateException("enterprise activation code missing");
+    }
+    return claimDevice(baseContext, enterpriseActivationCode, baseContext.deviceName);
+  }
+
+  @NonNull
   public EdgeLocalContext fetchCurrentSession(@NonNull EdgeLocalContext baseContext) throws Exception {
-    JSONObject data = request("/api/v1/edge/sessions/current", "GET", required(baseContext.deviceCode), required(baseContext.deviceToken), null);
+    JSONObject data = request(
+      "/api/v1/edge/sessions/current",
+      "GET",
+      required(baseContext.deviceCode),
+      required(baseContext.deviceToken),
+      null
+    );
     return mergeSession(baseContext, data);
   }
 
@@ -77,7 +86,13 @@ public final class EdgeApiClient {
     JSONObject request = new JSONObject();
     request.put("driverCode", driverCode.trim());
     request.put("pin", pin);
-    JSONObject data = request("/api/v1/edge/sessions/sign-in", "POST", required(baseContext.deviceCode), required(baseContext.deviceToken), request);
+    JSONObject data = request(
+      "/api/v1/edge/sessions/sign-in",
+      "POST",
+      required(baseContext.deviceCode),
+      required(baseContext.deviceToken),
+      request
+    );
     return mergeSession(baseContext, data);
   }
 
@@ -87,9 +102,19 @@ public final class EdgeApiClient {
     if (remark != null && !remark.trim().isEmpty()) {
       request.put("remark", remark.trim());
     }
-    JSONObject data = request("/api/v1/edge/sessions/sign-out", "POST", required(baseContext.deviceCode), required(baseContext.deviceToken), request);
+    JSONObject data = request(
+      "/api/v1/edge/sessions/sign-out",
+      "POST",
+      required(baseContext.deviceCode),
+      required(baseContext.deviceToken),
+      request
+    );
     EdgeLocalContext context = mergeSession(baseContext, data);
-    context.clearSession();
+    if (!isSessionActive(context)) {
+      context.clearSession();
+      context.sessionStage = "IDLE";
+      context.effectiveStage = resolveNonSessionStage(context);
+    }
     context.lastSyncAt = Instant.now().toString();
     return context;
   }
@@ -97,27 +122,166 @@ public final class EdgeApiClient {
   @NonNull
   private EdgeLocalContext mergeSession(@NonNull EdgeLocalContext baseContext, @NonNull JSONObject data) {
     EdgeLocalContext context = baseContext.copy();
-    context.enterpriseId = readLong(data, "enterpriseId");
-    context.enterpriseName = readString(data, "enterpriseName");
-    context.fleetId = readLong(data, "fleetId");
-    context.fleetName = readString(data, "fleetName");
-    context.vehicleId = readLong(data, "vehicleId");
-    context.vehiclePlateNumber = readString(data, "vehiclePlateNumber");
+    clearSessionSnapshot(context);
+    mergeSessionPayload(context, data);
+    boolean sessionActive = isSessionActive(context);
+
+    String effectiveStage = normalizeUpper(readString(data, "effectiveStage"));
+    if (effectiveStage != null) {
+      context.effectiveStage = effectiveStage;
+    } else if (sessionActive) {
+      context.effectiveStage = "IN_SESSION";
+    } else if ("IN_SESSION".equals(context.effectiveStage)) {
+      context.effectiveStage = resolveNonSessionStage(context);
+    }
+
+    context.configVersion = firstNonBlank(readString(data, "configVersion"), context.configVersion);
+    context.lastSyncAt = Instant.now().toString();
+    return context;
+  }
+
+  void mergeContextPayload(@NonNull EdgeLocalContext context, @NonNull JSONObject data) {
+    JSONObject device = readObject(data, "device");
+    if (device != null) {
+      context.deviceId = firstNonNull(readLong(device, "id"), context.deviceId);
+      context.deviceCode = firstNonBlank(readString(device, "deviceCode"), context.deviceCode);
+      context.deviceName = firstNonBlank(readString(device, "deviceName"), context.deviceName);
+      context.deviceToken = firstNonBlank(readString(device, "deviceToken"), context.deviceToken);
+    }
+
+    context.effectiveStage = normalizeUpper(readString(data, "effectiveStage"));
+    context.enterpriseId = readNestedLong(data, "enterprise", "id");
+    context.enterpriseName = readNestedString(data, "enterprise", "name");
+    context.fleetId = readNestedLong(data, "fleet", "id");
+    context.fleetName = readNestedString(data, "fleet", "name");
+    context.vehicleId = readNestedLong(data, "vehicle", "id");
+    context.vehiclePlateNumber = readNestedString(data, "vehicle", "plateNumber");
+    context.configVersion = readString(data, "configVersion");
+
+    clearBindRequestSnapshot(context);
+    clearSessionSnapshot(context);
+    context.sessionStage = normalizeUpper(readString(data, "sessionStage"));
+    mergeActiveSessionPayload(context, readObject(data, "activeSession"));
+    if (context.sessionStage == null && context.sessionId != null) {
+      context.sessionStage = "ACTIVE";
+    }
+
+    if (context.effectiveStage == null) {
+      context.effectiveStage = context.sessionId != null ? "IN_SESSION" : resolveNonSessionStage(context);
+    }
+  }
+
+  private void mergeActiveSessionPayload(@NonNull EdgeLocalContext context, @Nullable JSONObject activeSession) {
+    if (activeSession == null) {
+      return;
+    }
+    context.sessionId = firstNonNull(readLong(activeSession, "id"), readLong(activeSession, "sessionId"));
+    context.sessionNo = readString(activeSession, "sessionNo");
+    context.signedInAt = firstNonBlank(readString(activeSession, "signInTime"), readString(activeSession, "signedInAt"));
+    context.sessionClosedReason = readString(activeSession, "closedReason");
+    context.sessionStage = firstNonBlank(
+      normalizeUpper(readString(activeSession, "stage")),
+      normalizeUpper(readString(activeSession, "sessionStage"))
+    );
+    if (context.sessionStage == null) {
+      Integer status = readInt(activeSession, "status");
+      if (status != null) {
+        context.sessionStage = status == 1 ? "ACTIVE" : "IDLE";
+      }
+    }
+
+    JSONObject driver = readObject(activeSession, "driver");
+    if (driver != null) {
+      context.driverId = readLong(driver, "id");
+      context.driverCode = readString(driver, "driverCode");
+      context.driverName = firstNonBlank(readString(driver, "driverName"), readString(driver, "name"));
+      return;
+    }
+    context.driverId = readLong(activeSession, "driverId");
+    context.driverCode = readString(activeSession, "driverCode");
+    context.driverName = readString(activeSession, "driverName");
+  }
+
+  private void mergeSessionPayload(@NonNull EdgeLocalContext context, @NonNull JSONObject data) {
+    JSONObject activeSession = readObject(data, "activeSession");
+    if (activeSession != null) {
+      mergeActiveSessionPayload(context, activeSession);
+      return;
+    }
+
     context.driverId = readLong(data, "driverId");
     context.driverCode = readString(data, "driverCode");
     context.driverName = readString(data, "driverName");
-    context.sessionId = readLong(data, "sessionId");
+    context.sessionId = firstNonNull(readLong(data, "sessionId"), readLong(data, "id"));
     context.sessionNo = readString(data, "sessionNo");
-    Integer sessionStatus = readInt(data, "status");
-    context.sessionStatus = sessionStatus == null ? null : sessionStatus.byteValue();
-    context.signedInAt = readString(data, "signInTime");
+    context.signedInAt = firstNonBlank(readString(data, "signInTime"), readString(data, "signedInAt"));
     context.sessionClosedReason = readString(data, "closedReason");
-    context.configVersion = readString(data, "configVersion");
-    context.lastSyncAt = Instant.now().toString();
-    if (context.sessionId == null || context.sessionStatus == null || context.sessionStatus != (byte) 1) {
-      context.clearSession();
+    context.sessionStage = normalizeUpper(readString(data, "sessionStage"));
+    if (context.sessionStage == null) {
+      Integer status = readInt(data, "status");
+      if (status != null) {
+        context.sessionStage = status == 1 ? "ACTIVE" : "IDLE";
+      }
     }
-    return context;
+  }
+
+  private void clearContextSnapshot(@NonNull EdgeLocalContext context) {
+    context.deviceId = null;
+    context.deviceName = null;
+    context.enterpriseId = null;
+    context.enterpriseName = null;
+    context.fleetId = null;
+    context.fleetName = null;
+    context.vehicleId = null;
+    context.vehiclePlateNumber = null;
+    context.effectiveStage = null;
+    context.configVersion = null;
+    clearBindRequestSnapshot(context);
+    clearSessionSnapshot(context);
+  }
+
+  private void clearBindRequestSnapshot(@NonNull EdgeLocalContext context) {
+    context.bindRequestId = null;
+    context.bindRequestEnterpriseId = null;
+    context.bindRequestEnterpriseName = null;
+    context.bindRequestCodeMasked = null;
+    context.bindRequestSource = null;
+    context.bindRequestStatus = null;
+    context.bindRequestSubmittedAt = null;
+    context.bindRequestReviewedAt = null;
+    context.bindRequestApproveRemark = null;
+    context.bindRequestRejectReason = null;
+    context.bindRequestExpiresAt = null;
+  }
+
+  private void clearSessionSnapshot(@NonNull EdgeLocalContext context) {
+    context.driverId = null;
+    context.driverCode = null;
+    context.driverName = null;
+    context.sessionId = null;
+    context.sessionNo = null;
+    context.sessionStage = null;
+    context.signedInAt = null;
+    context.sessionClosedReason = null;
+  }
+
+  private boolean isSessionActive(@NonNull EdgeLocalContext context) {
+    return "ACTIVE".equals(context.sessionStage)
+      || (context.sessionId != null && context.sessionStage == null);
+  }
+
+  @NonNull
+  private String resolveNonSessionStage(@NonNull EdgeLocalContext context) {
+    if (context.isDisabled()) {
+      return "DISABLED";
+    }
+    if (context.hasVehicleBinding()) {
+      return "READY_SIGN_IN";
+    }
+    if (context.hasEnterpriseBinding()) {
+      return "WAITING_VEHICLE";
+    }
+    return "CLAIM_ENTERPRISE";
   }
 
   @NonNull
@@ -166,6 +330,7 @@ public final class EdgeApiClient {
     }
   }
 
+  @NonNull
   private String required(@Nullable String value) {
     if (value == null || value.trim().isEmpty()) {
       throw new IllegalStateException("device identity missing");
@@ -188,15 +353,93 @@ public final class EdgeApiClient {
     }
   }
 
+  @Nullable
+  private JSONObject readObject(@NonNull JSONObject json, @NonNull String key) {
+    return json.optJSONObject(key);
+  }
+
+  @Nullable
+  private Long readNestedLong(@NonNull JSONObject json, @NonNull String key, @NonNull String nestedKey) {
+    JSONObject nested = readObject(json, key);
+    return nested == null ? null : readLong(nested, nestedKey);
+  }
+
+  @Nullable
+  private String readNestedString(@NonNull JSONObject json, @NonNull String key, @NonNull String nestedKey) {
+    JSONObject nested = readObject(json, key);
+    return nested == null ? null : readString(nested, nestedKey);
+  }
+
+  @Nullable
   private Long readLong(@NonNull JSONObject json, @NonNull String key) {
-    return json.isNull(key) ? null : json.optLong(key);
+    if (!json.has(key) || json.isNull(key)) {
+      return null;
+    }
+    Object value = json.opt(key);
+    if (value instanceof Number) {
+      return ((Number) value).longValue();
+    }
+    if (value instanceof String) {
+      String text = ((String) value).trim();
+      if (text.isEmpty()) {
+        return null;
+      }
+      try {
+        return Long.parseLong(text);
+      } catch (NumberFormatException ignored) {
+        return null;
+      }
+    }
+    return null;
   }
 
+  @Nullable
   private Integer readInt(@NonNull JSONObject json, @NonNull String key) {
-    return json.isNull(key) ? null : json.optInt(key);
+    if (!json.has(key) || json.isNull(key)) {
+      return null;
+    }
+    Object value = json.opt(key);
+    if (value instanceof Number) {
+      return ((Number) value).intValue();
+    }
+    if (value instanceof String) {
+      String text = ((String) value).trim();
+      if (text.isEmpty()) {
+        return null;
+      }
+      try {
+        return Integer.parseInt(text);
+      } catch (NumberFormatException ignored) {
+        return null;
+      }
+    }
+    return null;
   }
 
+  @Nullable
   private String readString(@NonNull JSONObject json, @NonNull String key) {
-    return json.isNull(key) ? null : json.optString(key, null);
+    if (!json.has(key) || json.isNull(key)) {
+      return null;
+    }
+    String value = json.optString(key, null);
+    return value == null || value.trim().isEmpty() ? null : value;
+  }
+
+  @Nullable
+  private String normalizeUpper(@Nullable String value) {
+    if (value == null || value.trim().isEmpty()) {
+      return null;
+    }
+    return value.trim().toUpperCase();
+  }
+
+  @Nullable
+  private <T> T firstNonNull(@Nullable T first, @Nullable T second) {
+    return first != null ? first : second;
+  }
+
+  @Nullable
+  private String firstNonBlank(@Nullable String first, @Nullable String second) {
+    return first != null && !first.trim().isEmpty() ? first : second;
   }
 }

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools"
+  android:layout_width="match_parent"
+  android:layout_height="match_parent"
+  android:fillViewport="true"
+  tools:context=".ui.SignInActivity">
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="20dp">
+
+    <TextView
+      android:id="@+id/signInTitleView"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:text="@string/driver_sign_in_title"
+      android:textAppearance="@style/TextAppearance.Material3.HeadlineSmall" />
+
+    <TextView
+      android:id="@+id/signInSubtitleView"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginTop="8dp"
+      android:layout_marginBottom="16dp"
+      android:text="@string/driver_sign_in_subtitle"
+      android:textAppearance="@style/TextAppearance.Material3.BodyMedium" />
+
+    <TextView
+      android:id="@+id/edgeContextView"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginBottom="16dp"
+      android:text="@string/edge_context_empty"
+      android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+    <EditText
+      android:id="@+id/driverCodeInput"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginBottom="12dp"
+      android:hint="@string/driver_code_hint"
+      android:inputType="text"
+      android:maxLines="1" />
+
+    <EditText
+      android:id="@+id/driverPinInput"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginBottom="16dp"
+      android:hint="@string/driver_pin_hint"
+      android:inputType="numberPassword"
+      android:maxLines="1" />
+
+    <Button
+      android:id="@+id/signInButton"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:text="@string/driver_sign_in" />
+
+    <Button
+      android:id="@+id/syncButton"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginTop="12dp"
+      android:text="@string/edge_sync" />
+  </LinearLayout>
+</ScrollView>

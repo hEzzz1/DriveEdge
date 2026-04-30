@@ -19,6 +19,30 @@
 
     <activity
       android:name="com.driveedge.app.ui.MainActivity"
+      android:exported="false" />
+
+    <activity
+      android:name="com.driveedge.app.ui.VehicleWaitingActivity"
+      android:exported="false" />
+
+    <activity
+      android:name="com.driveedge.app.ui.EdgeDisabledActivity"
+      android:exported="false" />
+
+    <activity
+      android:name="com.driveedge.app.ui.BindPendingActivity"
+      android:exported="false" />
+
+    <activity
+      android:name="com.driveedge.app.ui.BindEnterpriseActivity"
+      android:exported="false" />
+
+    <activity
+      android:name="com.driveedge.app.ui.SignInActivity"
+      android:exported="false" />
+
+    <activity
+      android:name="com.driveedge.app.ui.EdgeLaunchActivity"
       android:exported="true">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
