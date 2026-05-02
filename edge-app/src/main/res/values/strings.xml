@@ -34,6 +34,9 @@
   <string name="edge_launch_failed">启动失败：%1$s</string>
   <string name="edge_launch_retry">绑定企业并启动</string>
   <string name="edge_launch_reset">清空设备配置</string>
+  <string name="edge_scan_qr">扫描二维码绑定</string>
+  <string name="edge_scan_qr_prompt">将企业激活二维码放入取景框内</string>
+  <string name="edge_scan_qr_invalid">二维码中未识别到企业激活码</string>
   <string name="edge_device_code_hint">设备码</string>
   <string name="edge_enterprise_activation_code_hint">企业激活码</string>
   <string name="edge_bind_title">输入企业绑定码</string>
