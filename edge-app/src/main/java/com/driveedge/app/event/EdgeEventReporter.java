@@ -99,6 +99,7 @@ public final class EdgeEventReporter implements AutoCloseable {
   private volatile String lastStatusLine = "事件上报：待触发";
 
   public EdgeEventReporter(@NonNull Context context, @NonNull StatusListener statusListener) {
+    this.statusListener = statusListener;
     Context appContext = context.getApplicationContext();
     ReporterQueueStore store;
     try {
@@ -135,7 +136,6 @@ public final class EdgeEventReporter implements AutoCloseable {
     this.injectedEventUploader = null;
     this.uploadExecutor = Executors.newSingleThreadExecutor();
     this.retryScheduler = Executors.newSingleThreadScheduledExecutor();
-    this.statusListener = statusListener;
     this.networkChecker = this::isNetworkAvailableDefault;
     this.connectivityManager = manager;
     this.networkCallback = callback;
@@ -279,6 +279,13 @@ public final class EdgeEventReporter implements AutoCloseable {
           return;
         }
 
+        EventUploader eventUploader = injectedEventUploader != null ? injectedEventUploader : createEventUploader(appContext, edgeContextStore);
+        if (eventUploader == null) {
+          updateStatus("事件上报：设备未激活，等待上下文同步");
+          scheduleNextRetryIfNeeded(nowMs);
+          return;
+        }
+
         List<UploadQueueItem> batch = storageCenter.claimUploadBatch(resolveBatchSize(nowMs), nowMs);
         if (batch.isEmpty()) {
           scheduleNextRetryIfNeeded(nowMs);
@@ -289,11 +296,6 @@ public final class EdgeEventReporter implements AutoCloseable {
         }
 
         for (UploadQueueItem item : batch) {
-          EventUploader eventUploader = injectedEventUploader != null ? injectedEventUploader : createEventUploader(appContext, edgeContextStore);
-          if (eventUploader == null) {
-            updateStatus("事件上报：设备未激活，等待上下文同步");
-            return;
-          }
           UploadReceipt receipt = eventUploader.upload(item.getEvent());
           EdgeEventRow row = storageCenter.onUploadResult(
             new UploadAttemptResult(
@@ -610,6 +612,37 @@ public final class EdgeEventReporter implements AutoCloseable {
     }
 
     @Override
+    public synchronized List<EdgeEventRow> claimReadyForUpload(long nowMs, int limit, long leaseUntilMs) {
+      if (limit <= 0) {
+        return new ArrayList<>();
+      }
+      List<EdgeEventRow> readyRows = listReadyForUpload(nowMs, limit);
+      if (readyRows.isEmpty()) {
+        return readyRows;
+      }
+      List<EdgeEventRow> claimedRows = new ArrayList<>(readyRows.size());
+      for (EdgeEventRow row : readyRows) {
+        EdgeEventRow claimed =
+          new EdgeEventRow(
+            row.getEvent(),
+            UploadStatus.SENDING,
+            row.getRetryCount(),
+            row.getLastErrorCode(),
+            row.getLastErrorMessage(),
+            row.getServerTraceId(),
+            leaseUntilMs,
+            nowMs,
+            row.getFailureClass(),
+            nowMs
+          );
+        edgeEvents.put(claimed.getEventId(), claimed);
+        claimedRows.add(claimed);
+      }
+      persistEdgeEvents();
+      return claimedRows;
+    }
+
+    @Override
     public synchronized List<EdgeEventRow> listReadyForUpload(long nowMs, int limit) {
       if (limit <= 0) {
         return new ArrayList<>();
@@ -677,11 +710,12 @@ public final class EdgeEventReporter implements AutoCloseable {
     public synchronized Long nextRetryAtMs(long nowMs) {
       Long nextRetryAtMs = null;
       for (EdgeEventRow row : edgeEvents.values()) {
-        if (row.getUploadStatus() != UploadStatus.RETRY_WAIT || row.getNextRetryAtMs() == null) {
+        if ((row.getUploadStatus() != UploadStatus.RETRY_WAIT && row.getUploadStatus() != UploadStatus.SENDING)) {
           continue;
         }
-        if (nextRetryAtMs == null || row.getNextRetryAtMs() < nextRetryAtMs) {
-          nextRetryAtMs = row.getNextRetryAtMs();
+        long candidateRetryAtMs = row.getNextRetryAtMs() == null ? nowMs : row.getNextRetryAtMs();
+        if (nextRetryAtMs == null || candidateRetryAtMs < nextRetryAtMs) {
+          nextRetryAtMs = candidateRetryAtMs;
         }
       }
       if (nextRetryAtMs != null && nextRetryAtMs <= nowMs) {
@@ -695,8 +729,8 @@ public final class EdgeEventReporter implements AutoCloseable {
         case PENDING:
           return true;
         case RETRY_WAIT:
-          return row.getNextRetryAtMs() != null && row.getNextRetryAtMs() <= nowMs;
         case SENDING:
+          return row.getNextRetryAtMs() == null || row.getNextRetryAtMs() <= nowMs;
         case SUCCESS:
         case FAILED_FINAL:
         default:
@@ -804,7 +838,7 @@ public final class EdgeEventReporter implements AutoCloseable {
         }
         object.put("triggerReasons", triggerReasons);
         object.put("algorithmVer", event.getAlgorithmVer());
-        object.put("uploadStatus", normalizePersistedStatus(row.getUploadStatus()).name());
+        object.put("uploadStatus", row.getUploadStatus().name());
         object.put("windowStartMs", event.getWindowStartMs());
         object.put("windowEndMs", event.getWindowEndMs());
         object.put("createdAtMs", event.getCreatedAtMs());
@@ -846,9 +880,6 @@ public final class EdgeEventReporter implements AutoCloseable {
         }
       }
       UploadStatus uploadStatus = UploadStatus.valueOf(object.optString("uploadStatus", UploadStatus.PENDING.name()));
-      if (uploadStatus == UploadStatus.SENDING) {
-        uploadStatus = UploadStatus.RETRY_WAIT;
-      }
       UploadFailureClass failureClass = UploadFailureClass.NONE;
       String failureClassName = object.optString("failureClass", UploadFailureClass.NONE.name());
       try {
@@ -920,19 +951,16 @@ public final class EdgeEventReporter implements AutoCloseable {
       );
     }
 
-    @NonNull
-    private UploadStatus normalizePersistedStatus(@NonNull UploadStatus uploadStatus) {
-      return uploadStatus == UploadStatus.SENDING ? UploadStatus.RETRY_WAIT : uploadStatus;
-    }
-
     private int priorityOf(@NonNull EdgeEventRow row) {
       switch (row.getUploadStatus()) {
         case RETRY_WAIT:
           return 0;
-        case PENDING:
+        case SENDING:
           return 1;
-        default:
+        case PENDING:
           return 2;
+        default:
+          return 3;
       }
     }
   }

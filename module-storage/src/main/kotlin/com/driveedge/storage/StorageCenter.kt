@@ -46,23 +46,13 @@ class StorageCenter(
   fun claimUploadBatch(
     limit: Int = config.defaultBatchSize,
     nowMs: Long = clock.millis(),
-  ): List<UploadQueueItem> {
-    val readyRows = edgeEventDao.listReadyForUpload(nowMs, limit)
-    if (readyRows.isEmpty()) {
-      return emptyList()
-    }
-    return readyRows.map { row ->
-      val claimed =
-        row.copy(
-          uploadStatus = UploadStatus.SENDING,
-          nextRetryAtMs = null,
-          lastAttemptAtMs = nowMs,
-          updatedAtMs = nowMs,
-        )
-      edgeEventDao.update(claimed)
-      claimed.toQueueItem()
-    }
-  }
+  ): List<UploadQueueItem> =
+    edgeEventDao
+      .claimReadyForUpload(
+        nowMs = nowMs,
+        limit = limit,
+        leaseUntilMs = nowMs.safeAdd(config.inFlightLeaseMs),
+      ).map { it.toQueueItem() }
 
   fun onUploadResult(
     result: UploadAttemptResult,
@@ -158,4 +148,11 @@ class StorageCenter(
     val SUCCESS_CODES: Set<Int> = setOf(0, 40002)
     val FINAL_FAILURE_CODES: Set<Int> = setOf(40001, 40101)
   }
+
+  private fun Long.safeAdd(delta: Long): Long =
+    if (Long.MAX_VALUE - this < delta) {
+      Long.MAX_VALUE
+    } else {
+      this + delta
+    }
 }

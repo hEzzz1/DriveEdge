@@ -29,6 +29,29 @@ class InMemoryRoomStore : EdgeEventDao, DeviceConfigDao {
   }
 
   @Synchronized
+  override fun claimReadyForUpload(
+    nowMs: Long,
+    limit: Int,
+    leaseUntilMs: Long,
+  ): List<EdgeEventRow> {
+    if (limit <= 0) {
+      return emptyList()
+    }
+    val readyRows = readyRows(nowMs).take(limit)
+    return readyRows.map { row ->
+      val claimed =
+        row.copy(
+          uploadStatus = UploadStatus.SENDING,
+          nextRetryAtMs = leaseUntilMs,
+          lastAttemptAtMs = nowMs,
+          updatedAtMs = nowMs,
+        )
+      edgeEvents[row.eventId] = claimed
+      claimed
+    }
+  }
+
+  @Synchronized
   override fun listReadyForUpload(
     nowMs: Long,
     limit: Int,
@@ -36,19 +59,7 @@ class InMemoryRoomStore : EdgeEventDao, DeviceConfigDao {
     if (limit <= 0) {
       return emptyList()
     }
-    return edgeEvents.values
-      .asSequence()
-      .filter { isReadyForUpload(it, nowMs) }
-      .sortedWith(
-        compareBy<EdgeEventRow>(
-          { priorityOf(it) },
-          { it.nextRetryAtMs ?: Long.MIN_VALUE },
-          { it.lastAttemptAtMs ?: Long.MIN_VALUE },
-          { it.event.createdAtMs },
-        ),
-      )
-      .take(limit)
-      .toList()
+    return readyRows(nowMs).take(limit)
   }
 
   @Synchronized
@@ -65,17 +76,33 @@ class InMemoryRoomStore : EdgeEventDao, DeviceConfigDao {
   ): Boolean =
     when (row.uploadStatus) {
       UploadStatus.PENDING -> true
-      UploadStatus.RETRY_WAIT -> (row.nextRetryAtMs ?: Long.MAX_VALUE) <= nowMs
+      UploadStatus.RETRY_WAIT,
       UploadStatus.SENDING,
+      -> (row.nextRetryAtMs ?: Long.MIN_VALUE) <= nowMs
       UploadStatus.SUCCESS,
       UploadStatus.FAILED_FINAL,
       -> false
     }
 
+  private fun readyRows(nowMs: Long): List<EdgeEventRow> =
+    edgeEvents.values
+      .asSequence()
+      .filter { isReadyForUpload(it, nowMs) }
+      .sortedWith(
+        compareBy<EdgeEventRow>(
+          { priorityOf(it) },
+          { it.nextRetryAtMs ?: Long.MIN_VALUE },
+          { it.lastAttemptAtMs ?: Long.MIN_VALUE },
+          { it.event.createdAtMs },
+        ),
+      )
+      .toList()
+
   private fun priorityOf(row: EdgeEventRow): Int =
     when (row.uploadStatus) {
       UploadStatus.RETRY_WAIT -> 0
-      UploadStatus.PENDING -> 1
-      else -> 2
+      UploadStatus.SENDING -> 1
+      UploadStatus.PENDING -> 2
+      else -> 3
     }
 }

@@ -295,6 +295,32 @@ public final class EdgeEventReporterTest {
     }
 
     @Override
+    public synchronized List<EdgeEventRow> claimReadyForUpload(long nowMs, int limit, long leaseUntilMs) {
+      if (limit <= 0) {
+        return new ArrayList<>();
+      }
+      List<EdgeEventRow> readyRows = listReadyForUpload(nowMs, limit);
+      List<EdgeEventRow> claimedRows = new ArrayList<>(readyRows.size());
+      for (EdgeEventRow row : readyRows) {
+        EdgeEventRow claimed = new EdgeEventRow(
+          row.getEvent(),
+          UploadStatus.SENDING,
+          row.getRetryCount(),
+          row.getLastErrorCode(),
+          row.getLastErrorMessage(),
+          row.getServerTraceId(),
+          leaseUntilMs,
+          nowMs,
+          row.getFailureClass(),
+          nowMs
+        );
+        edgeEvents.put(claimed.getEventId(), claimed);
+        claimedRows.add(claimed);
+      }
+      return claimedRows;
+    }
+
+    @Override
     public synchronized List<EdgeEventRow> listReadyForUpload(long nowMs, int limit) {
       maxRequestedLimit.accumulateAndGet(limit, Math::max);
       List<EdgeEventRow> readyRows = new ArrayList<>();
@@ -349,11 +375,12 @@ public final class EdgeEventReporterTest {
     public synchronized Long nextRetryAtMs(long nowMs) {
       Long nextRetryAtMs = null;
       for (EdgeEventRow row : edgeEvents.values()) {
-        if (row.getUploadStatus() != UploadStatus.RETRY_WAIT || row.getNextRetryAtMs() == null) {
+        if (row.getUploadStatus() != UploadStatus.RETRY_WAIT && row.getUploadStatus() != UploadStatus.SENDING) {
           continue;
         }
-        if (nextRetryAtMs == null || row.getNextRetryAtMs() < nextRetryAtMs) {
-          nextRetryAtMs = row.getNextRetryAtMs();
+        long candidateRetryAtMs = row.getNextRetryAtMs() == null ? nowMs : row.getNextRetryAtMs();
+        if (nextRetryAtMs == null || candidateRetryAtMs < nextRetryAtMs) {
+          nextRetryAtMs = candidateRetryAtMs;
         }
       }
       return nextRetryAtMs;
@@ -372,13 +399,18 @@ public final class EdgeEventReporterTest {
       if (row.getUploadStatus() == UploadStatus.PENDING) {
         return true;
       }
-      return row.getUploadStatus() == UploadStatus.RETRY_WAIT
-        && row.getNextRetryAtMs() != null
-        && row.getNextRetryAtMs() <= nowMs;
+      return (row.getUploadStatus() == UploadStatus.RETRY_WAIT || row.getUploadStatus() == UploadStatus.SENDING)
+        && (row.getNextRetryAtMs() == null || row.getNextRetryAtMs() <= nowMs);
     }
 
     private static int priorityOf(EdgeEventRow row) {
-      return row.getUploadStatus() == UploadStatus.RETRY_WAIT ? 0 : 1;
+      if (row.getUploadStatus() == UploadStatus.RETRY_WAIT) {
+        return 0;
+      }
+      if (row.getUploadStatus() == UploadStatus.SENDING) {
+        return 1;
+      }
+      return 2;
     }
   }
 }

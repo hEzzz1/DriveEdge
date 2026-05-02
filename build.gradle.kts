@@ -4,8 +4,8 @@ plugins {
 
 allprojects {
   repositories {
-    maven(url = "https://maven.aliyun.com/repository/public")
-    mavenCentral()
     google()
+    mavenCentral()
+    maven(url = "https://maven.aliyun.com/repository/public")
   }
 }

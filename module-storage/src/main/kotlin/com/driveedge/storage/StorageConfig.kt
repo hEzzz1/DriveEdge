@@ -7,11 +7,13 @@ data class StorageConfig
   val defaultBatchSize: Int = 50,
   val maxBatchSize: Int = 100,
   val retryBackoffPolicy: RetryBackoffPolicy = RetryBackoffPolicy(),
+  val inFlightLeaseMs: Long = 30_000L,
 ) {
   init {
     require(maxRetryCount > 0) { "maxRetryCount must be > 0" }
     require(defaultBatchSize > 0) { "defaultBatchSize must be > 0" }
     require(maxBatchSize >= defaultBatchSize) { "maxBatchSize must be >= defaultBatchSize" }
+    require(inFlightLeaseMs > 0L) { "inFlightLeaseMs must be > 0" }
   }
 }
 

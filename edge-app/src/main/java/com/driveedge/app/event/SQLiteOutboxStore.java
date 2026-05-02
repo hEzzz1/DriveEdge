@@ -29,6 +29,15 @@ import java.util.Set;
 final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventReporter.ReporterQueueStore {
   private static final String DB_NAME = "driveedge_outbox.db";
   private static final int DB_VERSION = 2;
+  private static final String READY_SELECTION =
+    "(upload_status = ?)"
+      + " OR (upload_status = ? AND (next_retry_at_ms IS NULL OR next_retry_at_ms <= ?))"
+      + " OR (upload_status = ? AND (next_retry_at_ms IS NULL OR next_retry_at_ms <= ?))";
+  private static final String READY_ORDER_BY =
+    "CASE WHEN upload_status = 'RETRY_WAIT' THEN 0 WHEN upload_status = 'SENDING' THEN 1 WHEN upload_status = 'PENDING' THEN 2 ELSE 3 END, "
+      + "COALESCE(next_retry_at_ms, -9223372036854775808), "
+      + "COALESCE(last_attempt_at_ms, -9223372036854775808), "
+      + "created_at_ms";
 
   private static final String TABLE_OUTBOX = "edge_event_outbox";
   private static final String TABLE_DEVICE_CONFIG = "device_config";
@@ -140,26 +149,69 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
   }
 
   @Override
+  public synchronized List<EdgeEventRow> claimReadyForUpload(long nowMs, int limit, long leaseUntilMs) {
+    if (limit <= 0) {
+      return new ArrayList<>();
+    }
+    SQLiteDatabase db = getWritableDatabase();
+    List<EdgeEventRow> claimedRows = new ArrayList<>();
+    db.beginTransaction();
+    try (
+      Cursor cursor =
+        db.query(
+          TABLE_OUTBOX,
+          null,
+          READY_SELECTION,
+          readySelectionArgs(nowMs),
+          null,
+          null,
+          READY_ORDER_BY,
+          String.valueOf(limit)
+        )
+    ) {
+      while (cursor.moveToNext()) {
+        EdgeEventRow current = fromCursor(cursor);
+        EdgeEventRow claimed =
+          current.copy(
+            current.getEvent(),
+            UploadStatus.SENDING,
+            current.getRetryCount(),
+            current.getLastErrorCode(),
+            current.getLastErrorMessage(),
+            current.getServerTraceId(),
+            leaseUntilMs,
+            nowMs,
+            current.getFailureClass(),
+            nowMs
+          );
+        db.update(
+          TABLE_OUTBOX,
+          toValues(claimed),
+          "event_id = ?",
+          new String[] {claimed.getEventId()}
+        );
+        claimedRows.add(claimed);
+      }
+      db.setTransactionSuccessful();
+    } finally {
+      db.endTransaction();
+    }
+    return claimedRows;
+  }
+
+  @Override
   public synchronized List<EdgeEventRow> listReadyForUpload(long nowMs, int limit) {
     List<EdgeEventRow> rows = new ArrayList<>();
-    String selection =
-      "(upload_status = ?)"
-        + " OR (upload_status = ? AND next_retry_at_ms IS NOT NULL AND next_retry_at_ms <= ?)";
-    String orderBy =
-      "CASE WHEN upload_status = 'RETRY_WAIT' THEN 0 WHEN upload_status = 'PENDING' THEN 1 ELSE 2 END, "
-        + "COALESCE(next_retry_at_ms, -9223372036854775808), "
-        + "COALESCE(last_attempt_at_ms, -9223372036854775808), "
-        + "created_at_ms";
     try (
       Cursor cursor =
         getReadableDatabase().query(
           TABLE_OUTBOX,
           null,
-          selection,
-          new String[] {UploadStatus.PENDING.name(), UploadStatus.RETRY_WAIT.name(), String.valueOf(nowMs)},
+          READY_SELECTION,
+          readySelectionArgs(nowMs),
           null,
           null,
-          orderBy,
+          READY_ORDER_BY,
           String.valueOf(Math.max(0, limit))
         )
     ) {
@@ -241,9 +293,13 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
     try (
       Cursor cursor =
         getReadableDatabase().rawQuery(
-          "SELECT MIN(next_retry_at_ms) FROM " + TABLE_OUTBOX
-            + " WHERE upload_status = ? AND next_retry_at_ms IS NOT NULL",
-          new String[] {UploadStatus.RETRY_WAIT.name()}
+          "SELECT MIN(COALESCE(next_retry_at_ms, ?)) FROM " + TABLE_OUTBOX
+            + " WHERE upload_status IN (?, ?)",
+          new String[] {
+            String.valueOf(nowMs),
+            UploadStatus.RETRY_WAIT.name(),
+            UploadStatus.SENDING.name(),
+          }
         )
     ) {
       if (!cursor.moveToFirst() || cursor.isNull(0)) {
@@ -277,7 +333,7 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
     values.put("dominant_risk_type", event.getDominantRiskType() == null ? null : event.getDominantRiskType().name());
     values.put("trigger_reasons_json", encodeTriggerReasons(event.getTriggerReasons()));
     values.put("algorithm_ver", event.getAlgorithmVer());
-    values.put("upload_status", normalizePersistedStatus(row.getUploadStatus()).name());
+    values.put("upload_status", row.getUploadStatus().name());
     values.put("window_start_ms", event.getWindowStartMs());
     values.put("window_end_ms", event.getWindowEndMs());
     values.put("created_at_ms", event.getCreatedAtMs());
@@ -329,9 +385,6 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
     }
 
     UploadStatus uploadStatus = UploadStatus.valueOf(requiredString(cursor, "upload_status"));
-    if (uploadStatus == UploadStatus.SENDING) {
-      uploadStatus = UploadStatus.RETRY_WAIT;
-    }
 
     UploadFailureClass failureClass = UploadFailureClass.NONE;
     String failureClassName = requiredString(cursor, "failure_class");
@@ -414,8 +467,15 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
   }
 
   @NonNull
-  private UploadStatus normalizePersistedStatus(@NonNull UploadStatus uploadStatus) {
-    return uploadStatus == UploadStatus.SENDING ? UploadStatus.RETRY_WAIT : uploadStatus;
+  private String[] readySelectionArgs(long nowMs) {
+    String now = String.valueOf(nowMs);
+    return new String[] {
+      UploadStatus.PENDING.name(),
+      UploadStatus.RETRY_WAIT.name(),
+      now,
+      UploadStatus.SENDING.name(),
+      now,
+    };
   }
 
   private int column(@NonNull Cursor cursor, @NonNull String name) {

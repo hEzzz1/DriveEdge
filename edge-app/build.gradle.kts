@@ -46,7 +46,7 @@ android {
     val hostlocalServerBaseUrl =
       providers.gradleProperty("edgeHostlocalServerBaseUrl")
         .orElse(providers.provider { localProperty("edgeHostlocalServerBaseUrl") })
-        .orElse("http://47.109.51.105")
+        .orElse("https://47.109.51.105")
         .get()
 
     create("simulator") {

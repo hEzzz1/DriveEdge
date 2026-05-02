@@ -7,6 +7,12 @@ interface EdgeEventDao {
 
   fun update(row: EdgeEventRow)
 
+  fun claimReadyForUpload(
+    nowMs: Long,
+    limit: Int,
+    leaseUntilMs: Long,
+  ): List<EdgeEventRow>
+
   fun listReadyForUpload(
     nowMs: Long,
     limit: Int,

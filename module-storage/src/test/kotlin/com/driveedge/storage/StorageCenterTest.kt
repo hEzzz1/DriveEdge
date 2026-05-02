@@ -37,6 +37,22 @@ class StorageCenterTest {
   }
 
   @Test
+  fun `claimUploadBatch reclaims expired sending event after lease timeout`() {
+    val center = StorageCenter(config = StorageConfig(inFlightLeaseMs = 500L))
+    center.onEdgeEvent(event(eventId = "evt-lease", createdAtMs = 1_000L), nowMs = 1_000L)
+
+    val firstClaim = center.claimUploadBatch(limit = 1, nowMs = 1_500L)
+    assertEquals(1, firstClaim.size)
+    assertTrue(center.pendingUploadQueue(nowMs = 1_999L).isEmpty())
+
+    val reclaimed = center.claimUploadBatch(limit = 1, nowMs = 2_000L)
+
+    assertEquals(1, reclaimed.size)
+    assertEquals(UploadStatus.SENDING, reclaimed.first().event.uploadStatus)
+    assertEquals(2_500L, center.getEventRow("evt-lease")!!.nextRetryAtMs)
+  }
+
+  @Test
   fun `onUploadResult moves sending event to success`() {
     val center = StorageCenter()
     center.onEdgeEvent(event(eventId = "evt-success", createdAtMs = 1_000L), nowMs = 1_000L)
