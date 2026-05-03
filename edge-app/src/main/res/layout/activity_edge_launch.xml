@@ -25,7 +25,7 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:layout_marginTop="20dp"
-    android:text="@string/edge_bind_device_code"
+    android:text="@string/edge_launch_device_code"
     android:textAppearance="@style/TextAppearance.Material3.LabelLarge" />
 
   <TextView

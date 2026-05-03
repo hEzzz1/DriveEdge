@@ -57,19 +57,6 @@ public final class EdgeApiClient {
   }
 
   @NonNull
-  public EdgeLocalContext submitBindRequest(
-    @NonNull EdgeLocalContext baseContext,
-    @Nullable String bindCode,
-    @Nullable String remark
-  ) throws Exception {
-    String enterpriseActivationCode = bindCode == null ? null : bindCode.trim();
-    if (enterpriseActivationCode == null || enterpriseActivationCode.isEmpty()) {
-      throw new IllegalStateException("enterprise activation code missing");
-    }
-    return claimDevice(baseContext, enterpriseActivationCode, baseContext.deviceName);
-  }
-
-  @NonNull
   public EdgeLocalContext fetchCurrentSession(@NonNull EdgeLocalContext baseContext) throws Exception {
     JSONObject data = request(
       "/api/v1/edge/sessions/current",
@@ -158,7 +145,6 @@ public final class EdgeApiClient {
     context.vehiclePlateNumber = readNestedString(data, "vehicle", "plateNumber");
     context.configVersion = readString(data, "configVersion");
 
-    clearBindRequestSnapshot(context);
     clearSessionSnapshot(context);
     context.sessionStage = normalizeUpper(readString(data, "sessionStage"));
     mergeActiveSessionPayload(context, readObject(data, "activeSession"));
@@ -236,22 +222,7 @@ public final class EdgeApiClient {
     context.vehiclePlateNumber = null;
     context.effectiveStage = null;
     context.configVersion = null;
-    clearBindRequestSnapshot(context);
     clearSessionSnapshot(context);
-  }
-
-  private void clearBindRequestSnapshot(@NonNull EdgeLocalContext context) {
-    context.bindRequestId = null;
-    context.bindRequestEnterpriseId = null;
-    context.bindRequestEnterpriseName = null;
-    context.bindRequestCodeMasked = null;
-    context.bindRequestSource = null;
-    context.bindRequestStatus = null;
-    context.bindRequestSubmittedAt = null;
-    context.bindRequestReviewedAt = null;
-    context.bindRequestApproveRemark = null;
-    context.bindRequestRejectReason = null;
-    context.bindRequestExpiresAt = null;
   }
 
   private void clearSessionSnapshot(@NonNull EdgeLocalContext context) {

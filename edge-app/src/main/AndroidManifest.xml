@@ -31,14 +31,6 @@
       android:exported="false" />
 
     <activity
-      android:name="com.driveedge.app.ui.BindPendingActivity"
-      android:exported="false" />
-
-    <activity
-      android:name="com.driveedge.app.ui.BindEnterpriseActivity"
-      android:exported="false" />
-
-    <activity
       android:name="com.driveedge.app.ui.SignInActivity"
       android:exported="false" />
 

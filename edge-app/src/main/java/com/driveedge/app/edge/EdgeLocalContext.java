@@ -16,17 +16,6 @@ public final class EdgeLocalContext {
   @Nullable public Long vehicleId;
   @Nullable public String vehiclePlateNumber;
   @Nullable public String effectiveStage;
-  @Nullable public Long bindRequestId;
-  @Nullable public Long bindRequestEnterpriseId;
-  @Nullable public String bindRequestEnterpriseName;
-  @Nullable public String bindRequestCodeMasked;
-  @Nullable public String bindRequestSource;
-  @Nullable public String bindRequestStatus;
-  @Nullable public String bindRequestSubmittedAt;
-  @Nullable public String bindRequestReviewedAt;
-  @Nullable public String bindRequestApproveRemark;
-  @Nullable public String bindRequestRejectReason;
-  @Nullable public String bindRequestExpiresAt;
   @Nullable public Long driverId;
   @Nullable public String driverCode;
   @Nullable public String driverName;
@@ -58,17 +47,6 @@ public final class EdgeLocalContext {
     copy.vehicleId = vehicleId;
     copy.vehiclePlateNumber = vehiclePlateNumber;
     copy.effectiveStage = effectiveStage;
-    copy.bindRequestId = bindRequestId;
-    copy.bindRequestEnterpriseId = bindRequestEnterpriseId;
-    copy.bindRequestEnterpriseName = bindRequestEnterpriseName;
-    copy.bindRequestCodeMasked = bindRequestCodeMasked;
-    copy.bindRequestSource = bindRequestSource;
-    copy.bindRequestStatus = bindRequestStatus;
-    copy.bindRequestSubmittedAt = bindRequestSubmittedAt;
-    copy.bindRequestReviewedAt = bindRequestReviewedAt;
-    copy.bindRequestApproveRemark = bindRequestApproveRemark;
-    copy.bindRequestRejectReason = bindRequestRejectReason;
-    copy.bindRequestExpiresAt = bindRequestExpiresAt;
     copy.driverId = driverId;
     copy.driverCode = driverCode;
     copy.driverName = driverName;
@@ -99,18 +77,6 @@ public final class EdgeLocalContext {
     return "IN_SESSION".equals(effectiveStage)
       || "ACTIVE".equals(sessionStage)
       || (sessionId != null && sessionStage == null);
-  }
-
-  public boolean hasPendingBindRequest() {
-    return "PENDING_APPROVAL".equals(effectiveStage) || "PENDING".equals(bindRequestStatus);
-  }
-
-  public boolean hasRejectedBindRequest() {
-    return "REJECTED".equals(bindRequestStatus);
-  }
-
-  public boolean hasExpiredBindRequest() {
-    return "EXPIRED".equals(bindRequestStatus);
   }
 
   public boolean isDisabled() {
@@ -144,36 +110,8 @@ public final class EdgeLocalContext {
     vehicleId = null;
     vehiclePlateNumber = null;
     effectiveStage = null;
-    bindRequestId = null;
-    bindRequestEnterpriseId = null;
-    bindRequestEnterpriseName = null;
-    bindRequestCodeMasked = null;
-    bindRequestSource = null;
-    bindRequestStatus = null;
-    bindRequestSubmittedAt = null;
-    bindRequestReviewedAt = null;
-    bindRequestApproveRemark = null;
-    bindRequestRejectReason = null;
-    bindRequestExpiresAt = null;
     configVersion = null;
     lastSyncAt = null;
     clearSession();
-  }
-
-  @NonNull
-  public String resolvedBindEnterpriseName() {
-    if (bindRequestEnterpriseName != null && !bindRequestEnterpriseName.trim().isEmpty()) {
-      return bindRequestEnterpriseName;
-    }
-    if (enterpriseName != null && !enterpriseName.trim().isEmpty()) {
-      return enterpriseName;
-    }
-    if (bindRequestEnterpriseId != null) {
-      return String.valueOf(bindRequestEnterpriseId);
-    }
-    if (enterpriseId != null) {
-      return String.valueOf(enterpriseId);
-    }
-    return "-";
   }
 }
