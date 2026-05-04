@@ -2,17 +2,13 @@ package com.driveedge.app.ui;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
-import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
-import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.graphics.YuvImage;
@@ -27,16 +23,13 @@ import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
-import android.media.MediaRecorder;
 import android.media.AudioManager;
 import android.media.ToneGenerator;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
-import android.provider.DocumentsContract;
 import android.util.Base64;
 import android.util.Log;
 import android.util.Range;
@@ -73,8 +66,6 @@ import com.driveedge.risk.engine.RiskEngine;
 import com.driveedge.risk.engine.RiskEngineConfig;
 import com.driveedge.risk.engine.RiskEventCandidate;
 import com.driveedge.risk.engine.RiskLevel;
-import com.driveedge.risk.engine.RiskType;
-import com.driveedge.risk.engine.TriggerReason;
 import com.driveedge.temporal.engine.FeatureWindow;
 import com.driveedge.temporal.engine.TemporalEngine;
 import com.driveedge.temporal.engine.TemporalEngineConfig;
@@ -82,14 +73,9 @@ import com.driveedge.infer.yolo.DetectionResult;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -105,11 +91,8 @@ public final class MainActivity extends AppCompatActivity {
   private static final int ANALYSIS_TARGET_WIDTH = 1920;
   private static final int ANALYSIS_TARGET_HEIGHT = 1080;
   private static final int AE_AWB_STABLE_FRAME_COUNT = 8;
-  private static final long REPLAY_DUMP_INTERVAL_MS = 1000L;
-  private static final long PROBE_DUMP_INTERVAL_MS = 1000L;
-  private static final int REPLAY_JPEG_QUALITY = 92;
-  private static final int DEFAULT_RECORD_WIDTH = 1280;
-  private static final int DEFAULT_RECORD_HEIGHT = 720;
+  private static final int DEFAULT_PREVIEW_WIDTH = 1280;
+  private static final int DEFAULT_PREVIEW_HEIGHT = 720;
   private static final String LOCAL_MODEL_ASSET_PATH = "models/yolov8face.onnx";
   private static final String LOCAL_FATIGUE_MODEL_ASSET_PATH = "models/face_landmarker.task";
   private static final float LOCAL_CONF_THRESHOLD = 0.25f;
@@ -136,12 +119,12 @@ public final class MainActivity extends AppCompatActivity {
       80L,
       600L,
       700L,
-      0.35f,
-      0.45,
-      0.42,
-      0.50,
-      1_000L,
-      1_000L
+      0.60f,
+      0.62,
+      0.68,
+      0.72,
+      2_500L,
+      2_500L
     );
   @NonNull
   private static final RiskEngineConfig REALTIME_RISK_CONFIG =
@@ -152,12 +135,12 @@ public final class MainActivity extends AppCompatActivity {
       2_000L,
       1,
       30_000L,
-      1_500L,
-      0.50,
-      0.45,
-      1_000L,
-      0.42,
-      1_000L,
+      3_500L,
+      0.72,
+      0.62,
+      2_500L,
+      0.68,
+      2_500L,
       2,
       2,
       0.03,
@@ -165,9 +148,8 @@ public final class MainActivity extends AppCompatActivity {
       0.48,
       0.65,
       0.80
-    );
+  );
   private static final byte[] EMPTY_FRAME_BYTES = new byte[0];
-  private static final String[] LOCAL_CLASS_NAMES = {"face"};
 
   private TextureView previewView;
   private TextView statusView;
@@ -175,8 +157,6 @@ public final class MainActivity extends AppCompatActivity {
   private TextView edgeContextView;
   private Button startButton;
   private Button stopButton;
-  private Button recordButton;
-  private Button openRecordingsButton;
   private Button syncButton;
   private Button signOutButton;
 
@@ -186,10 +166,8 @@ public final class MainActivity extends AppCompatActivity {
   private String openedCameraId;
   private int frontCameraSensorOrientation = 0;
   private int frontCameraLensFacing = CameraCharacteristics.LENS_FACING_FRONT;
-  private int recordWidth = DEFAULT_RECORD_WIDTH;
-  private int recordHeight = DEFAULT_RECORD_HEIGHT;
-  private int previewWidth = DEFAULT_RECORD_WIDTH;
-  private int previewHeight = DEFAULT_RECORD_HEIGHT;
+  private int previewWidth = DEFAULT_PREVIEW_WIDTH;
+  private int previewHeight = DEFAULT_PREVIEW_HEIGHT;
   private int analysisWidth = ANALYSIS_TARGET_WIDTH;
   private int analysisHeight = ANALYSIS_TARGET_HEIGHT;
   private int noiseReductionMode = CaptureRequest.NOISE_REDUCTION_MODE_FAST;
@@ -213,19 +191,10 @@ public final class MainActivity extends AppCompatActivity {
   @Nullable
   private ImageReader imageReader;
 
-  @Nullable
-  private MediaRecorder mediaRecorder;
-  @Nullable
-  private Surface recorderSurface;
-  @Nullable
-  private File recordingFile;
-  private boolean isRecording = false;
-
   private final ExecutorService inferExecutor = Executors.newSingleThreadExecutor();
   private final ExecutorService edgeIoExecutor = Executors.newSingleThreadExecutor();
   private final AtomicBoolean inferTaskRunning = new AtomicBoolean(false);
   private final AtomicInteger secondFrameCounter = new AtomicInteger(0);
-  private final AtomicInteger secondInferenceCounter = new AtomicInteger(0);
 
   @Nullable
   private LocalOnnxDetector localOnnxDetector;
@@ -246,8 +215,6 @@ public final class MainActivity extends AppCompatActivity {
   private boolean previewUploadLoopRunning = false;
   private long lastStatusUpdateMs = 0L;
   private long lastInferStatusUpdateMs = 0L;
-  private long lastReplayDumpMs = 0L;
-  private long lastProbeDumpMs = 0L;
   private long lastWaitingStatusMs = 0L;
   private long lastFatigueWarningToastMs = 0L;
   private long lastDistractionWarningToastMs = 0L;
@@ -257,8 +224,6 @@ public final class MainActivity extends AppCompatActivity {
   private int realtimeRiskMissingFaceFrames = 0;
   private boolean analyzersReady = false;
   private long lastQuickFatigueDetectedElapsedMs = 0L;
-  @NonNull
-  private String lastQuickFatigueEventSummary = "fatigue_normal";
   @Nullable
   private ToneGenerator fatigueToneGenerator;
   @Nullable
@@ -283,8 +248,6 @@ public final class MainActivity extends AppCompatActivity {
   private volatile RiskEngine riskEngine = new RiskEngine(REALTIME_RISK_CONFIG);
   @Nullable
   private volatile RiskEventCandidate latestRiskCandidate;
-  @NonNull
-  private String inferSessionId = "session-init";
   @NonNull
   private final Object latestYuvFrameLock = new Object();
   @Nullable
@@ -357,8 +320,6 @@ public final class MainActivity extends AppCompatActivity {
     edgeContextView = findViewById(R.id.edgeContextView);
     startButton = findViewById(R.id.startButton);
     stopButton = findViewById(R.id.stopButton);
-    recordButton = findViewById(R.id.recordButton);
-    openRecordingsButton = findViewById(R.id.openRecordingsButton);
     syncButton = findViewById(R.id.syncButton);
     signOutButton = findViewById(R.id.signOutButton);
 
@@ -373,16 +334,12 @@ public final class MainActivity extends AppCompatActivity {
     previewView.setSurfaceTextureListener(surfaceTextureListener);
     startButton.setOnClickListener(v -> ensurePermissionThenStart());
     stopButton.setOnClickListener(v -> stopCapture());
-    recordButton.setOnClickListener(v -> toggleRecording());
-    openRecordingsButton.setOnClickListener(v -> openRecordingsDirectory());
     syncButton.setOnClickListener(v -> refreshEdgeContext(false));
     signOutButton.setOnClickListener(v -> signOutDriver());
 
     startButton.setEnabled(false);
     stopButton.setEnabled(false);
-    recordButton.setEnabled(false);
     signOutButton.setEnabled(edgeLocalContext.hasActiveSession());
-    updateRecordButton();
     resetInferSession();
     edgeEventReporter =
       new EdgeEventReporter(
@@ -439,8 +396,6 @@ public final class MainActivity extends AppCompatActivity {
     statusView.setText(getString(R.string.status_connected));
     startButton.setEnabled(false);
     stopButton.setEnabled(true);
-    recordButton.setEnabled(true);
-    updateRecordButton();
     startCameraThreadIfNeeded();
     startPreviewUploadLoop();
     if (previewView.isAvailable()) {
@@ -465,7 +420,7 @@ public final class MainActivity extends AppCompatActivity {
         runOnUiThread(() -> {
           startButton.setEnabled(false);
           updateSessionControls();
-          fatigueStatusView.setText(getString(R.string.status_local_error, formatError(error)));
+          fatigueStatusView.setText(getString(R.string.status_local_error));
         });
       }
     });
@@ -539,14 +494,9 @@ public final class MainActivity extends AppCompatActivity {
     EdgeLocalContext context = edgeLocalContext;
     edgeContextView.setText(getString(
       R.string.edge_context_format,
-      EdgeFlowController.displayValue(context.enterpriseName, context.enterpriseId),
-      edgeFlowController.displayBindStatus(context),
-      EdgeFlowController.displayValue(context.fleetName, context.fleetId),
       EdgeFlowController.displayValue(context.vehiclePlateNumber, context.vehicleId),
       EdgeFlowController.displayDriverValue(context),
-      EdgeFlowController.displayText(context.signedInAt),
-      EdgeFlowController.displayText(context.configVersion),
-      EdgeFlowController.displayText(context.lastSyncAt),
+      edgeFlowController.displayBindStatus(context),
       edgeEventStatusLine
     ));
     updateSessionControls();
@@ -597,19 +547,15 @@ public final class MainActivity extends AppCompatActivity {
       return;
     }
     captureStarted = false;
-    stopRecordingInternal(false);
     closeCameraResources();
     stopCameraThreadIfNeeded();
     stopPreviewUploadLoop();
     secondFrameCounter.set(0);
-    secondInferenceCounter.set(0);
     resetRealtimeRiskTracking();
     statusView.setText(getString(R.string.status_stopped));
     fatigueStatusView.setText(getString(R.string.status_local_stopped));
     updateSessionControls();
     stopButton.setEnabled(false);
-    recordButton.setEnabled(false);
-    updateRecordButton();
   }
 
   private void startCameraThreadIfNeeded() {
@@ -654,7 +600,7 @@ public final class MainActivity extends AppCompatActivity {
       String cameraId = resolveFrontCameraId(manager);
       manager.openCamera(cameraId, cameraStateCallback, handler);
     } catch (Exception error) {
-      postStatusText(getString(R.string.status_error, error.getClass().getSimpleName()));
+      postStatusText(getString(R.string.status_error));
     }
   }
 
@@ -673,7 +619,6 @@ public final class MainActivity extends AppCompatActivity {
         frontCameraSensorOrientation = sensorOrientation == null ? 0 : sensorOrientation;
         frontCameraLensFacing = lensFacing;
         openedCameraId = cameraId;
-        updateRecordingSize(characteristics);
         updatePreviewSize(characteristics);
         updateAnalysisConfig(characteristics);
         updateQualityModeConfig(characteristics);
@@ -688,23 +633,19 @@ public final class MainActivity extends AppCompatActivity {
     frontCameraSensorOrientation = sensorOrientation == null ? 0 : sensorOrientation;
     frontCameraLensFacing = lensFacing == null ? CameraCharacteristics.LENS_FACING_FRONT : lensFacing;
     openedCameraId = fallback;
-    updateRecordingSize(characteristics);
     updatePreviewSize(characteristics);
     updateAnalysisConfig(characteristics);
     updateQualityModeConfig(characteristics);
     return fallback;
   }
 
-  private void updateRecordingSize(@NonNull CameraCharacteristics characteristics) {
-    StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-    Size selected = chooseRecordingSize(map == null ? null : map.getOutputSizes(MediaRecorder.class));
-    recordWidth = selected.getWidth();
-    recordHeight = selected.getHeight();
-  }
-
   private void updatePreviewSize(@NonNull CameraCharacteristics characteristics) {
     StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-    Size selected = choosePreviewSize(map == null ? null : map.getOutputSizes(SurfaceTexture.class), recordWidth, recordHeight);
+    Size selected = choosePreviewSize(
+      map == null ? null : map.getOutputSizes(SurfaceTexture.class),
+      DEFAULT_PREVIEW_WIDTH,
+      DEFAULT_PREVIEW_HEIGHT
+    );
     previewWidth = selected.getWidth();
     previewHeight = selected.getHeight();
   }
@@ -740,44 +681,6 @@ public final class MainActivity extends AppCompatActivity {
     );
     aeLockAvailable = aeLock != null && aeLock;
     awbLockAvailable = awbLock != null && awbLock;
-  }
-
-  @NonNull
-  private Size chooseRecordingSize(@Nullable Size[] sizes) {
-    if (sizes == null || sizes.length == 0) {
-      return new Size(DEFAULT_RECORD_WIDTH, DEFAULT_RECORD_HEIGHT);
-    }
-
-    for (Size size : sizes) {
-      if (size.getWidth() == 1280 && size.getHeight() == 720) {
-        return size;
-      }
-    }
-    for (Size size : sizes) {
-      if (size.getWidth() == 1920 && size.getHeight() == 1080) {
-        return size;
-      }
-    }
-
-    Size bestUnder720p = null;
-    for (Size size : sizes) {
-      if (size.getWidth() <= 1280 && size.getHeight() <= 720) {
-        if (bestUnder720p == null || (size.getWidth() * size.getHeight()) > (bestUnder720p.getWidth() * bestUnder720p.getHeight())) {
-          bestUnder720p = size;
-        }
-      }
-    }
-    if (bestUnder720p != null) {
-      return bestUnder720p;
-    }
-
-    Size largest = sizes[0];
-    for (Size size : sizes) {
-      if ((size.getWidth() * size.getHeight()) > (largest.getWidth() * largest.getHeight())) {
-        largest = size;
-      }
-    }
-    return largest;
   }
 
   @NonNull
@@ -901,7 +804,7 @@ public final class MainActivity extends AppCompatActivity {
     public void onError(@NonNull CameraDevice camera, int error) {
       camera.close();
       cameraDevice = null;
-      runOnUiThread(() -> statusView.setText(getString(R.string.status_camera_failed, error)));
+      runOnUiThread(() -> statusView.setText(getString(R.string.status_camera_failed)));
     }
   };
 
@@ -914,17 +817,7 @@ public final class MainActivity extends AppCompatActivity {
 
     try {
       ImageReader reader = imageReader;
-      if (withRecorder) {
-        // Some devices show green recording when analysis stream is kept alive.
-        if (reader != null) {
-          reader.close();
-          imageReader = null;
-          reader = null;
-        }
-        synchronized (latestYuvFrameLock) {
-          latestYuvFrame = null;
-        }
-      } else if (reader == null) {
+      if (reader == null) {
         reader = ImageReader.newInstance(analysisWidth, analysisHeight, ImageFormat.YUV_420_888, 2);
         reader.setOnImageAvailableListener(this::onImageAvailable, handler);
         imageReader = reader;
@@ -943,13 +836,8 @@ public final class MainActivity extends AppCompatActivity {
       // Evidence video is assembled from buffered JPEG frames. Keeping the default
       // session to preview + YUV avoids green output on Camera2 implementations
       // that do not handle preview + analysis + encoder surfaces reliably.
-      // Some devices produce green recordings when recorder + YUV analysis run together.
-      // During recording, keep only preview + recorder streams.
-      if (!withRecorder && yuvSurface != null) {
+      if (yuvSurface != null) {
         surfaces.add(yuvSurface);
-      }
-      if (withRecorder && recorderSurface != null) {
-        surfaces.add(recorderSurface);
       }
 
       CameraCaptureSession oldSession = captureSession;
@@ -962,7 +850,6 @@ public final class MainActivity extends AppCompatActivity {
         oldSession.close();
       }
 
-      int template = withRecorder ? CameraDevice.TEMPLATE_RECORD : CameraDevice.TEMPLATE_PREVIEW;
       device.createCaptureSession(
         surfaces,
         new CameraCaptureSession.StateCallback() {
@@ -974,33 +861,22 @@ public final class MainActivity extends AppCompatActivity {
             }
             captureSession = session;
             try {
-              CaptureRequest.Builder builder = cameraDevice.createCaptureRequest(template);
+              CaptureRequest.Builder builder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
               builder.addTarget(previewSurface);
-              if (!withRecorder && yuvSurface != null) {
+              if (yuvSurface != null) {
                 builder.addTarget(yuvSurface);
               }
-              if (withRecorder && recorderSurface != null) {
-                builder.addTarget(recorderSurface);
-              }
-              applyHighQualityCaptureParams(builder, withRecorder);
-              if (!withRecorder) {
-                previewRequestBuilder = builder;
-                aeAwbStableFrames = 0;
-                aeAwbLocked = !aeLockAvailable && !awbLockAvailable;
-              } else {
-                previewRequestBuilder = null;
-              }
+              applyHighQualityCaptureParams(builder);
+              previewRequestBuilder = builder;
+              aeAwbStableFrames = 0;
+              aeAwbLocked = !aeLockAvailable && !awbLockAvailable;
               session.setRepeatingRequest(
                 builder.build(),
-                withRecorder ? null : previewCaptureCallback,
+                previewCaptureCallback,
                 handler
               );
-
-              if (withRecorder && startRecorderOnConfigured) {
-                startMediaRecorderAfterSessionReady();
-              }
             } catch (Exception error) {
-              runOnUiThread(() -> statusView.setText(getString(R.string.status_error, error.getClass().getSimpleName())));
+              runOnUiThread(() -> statusView.setText(getString(R.string.status_error)));
             }
           }
 
@@ -1012,7 +888,7 @@ public final class MainActivity extends AppCompatActivity {
         handler
       );
     } catch (Exception error) {
-      postStatusText(getString(R.string.status_error, error.getClass().getSimpleName()));
+      postStatusText(getString(R.string.status_error));
     }
   }
 
@@ -1020,23 +896,19 @@ public final class MainActivity extends AppCompatActivity {
     runOnUiThread(() -> statusView.setText(text));
   }
 
-  private void applyHighQualityCaptureParams(@NonNull CaptureRequest.Builder builder, boolean withRecorder) {
+  private void applyHighQualityCaptureParams(@NonNull CaptureRequest.Builder builder) {
     builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
-    if (!withRecorder) {
-      builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(15, 30));
-    }
+    builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(15, 30));
 
     builder.set(CaptureRequest.NOISE_REDUCTION_MODE, noiseReductionMode);
     builder.set(CaptureRequest.EDGE_MODE, edgeMode);
     builder.set(CaptureRequest.TONEMAP_MODE, toneMapMode);
 
-    if (!withRecorder) {
-      if (aeLockAvailable) {
-        builder.set(CaptureRequest.CONTROL_AE_LOCK, false);
-      }
-      if (awbLockAvailable) {
-        builder.set(CaptureRequest.CONTROL_AWB_LOCK, false);
-      }
+    if (aeLockAvailable) {
+      builder.set(CaptureRequest.CONTROL_AE_LOCK, false);
+    }
+    if (awbLockAvailable) {
+      builder.set(CaptureRequest.CONTROL_AWB_LOCK, false);
     }
   }
 
@@ -1125,17 +997,14 @@ public final class MainActivity extends AppCompatActivity {
       return;
     }
     try {
-      if (captureStarted && !isRecording) {
-        maybeDumpProbeFrame();
-        if (tryReserveInferSlot()) {
-          LocalUploadFrame localFrame = convertYuvToLocalUploadFrame();
-          if (localFrame != null) {
-            dispatchLocalInferFrame(localFrame);
-            onFrameStatusTick(localFrame.frame);
-          } else {
-            maybeUpdateWaitingStatus();
-            inferTaskRunning.set(false);
-          }
+      if (captureStarted && tryReserveInferSlot()) {
+        LocalUploadFrame localFrame = convertYuvToLocalUploadFrame();
+        if (localFrame != null) {
+          dispatchLocalInferFrame(localFrame);
+          onFrameStatusTick(localFrame.frame);
+        } else {
+          maybeUpdateWaitingStatus();
+          inferTaskRunning.set(false);
         }
       }
     } catch (Exception ignored) {
@@ -1155,22 +1024,18 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     try {
-      EncodedJpeg localFrame = encodeNormalizedNv21ToJpeg(yuvFrame, REPLAY_JPEG_QUALITY);
       Bitmap modelBitmap = createModelBitmapFromYuvFrame(yuvFrame);
       FrameData frame = new FrameData(
-        localFrame.width,
-        localFrame.height,
+        modelBitmap.getWidth(),
+        modelBitmap.getHeight(),
         0,
         yuvFrame.timestampNs,
         EMPTY_FRAME_BYTES
       );
       return new LocalUploadFrame(
         frame,
-        localFrame.jpeg,
-        localFrame.jpeg,
         modelBitmap,
-        yuvFrame.capturedAtMs,
-        "raw"
+        yuvFrame.capturedAtMs
       );
     } catch (Exception error) {
       Log.w(TAG, "Local frame conversion failed", error);
@@ -1336,15 +1201,6 @@ public final class MainActivity extends AppCompatActivity {
     }
   }
 
-  private int computeVideoOrientationHint() {
-    int displayDegrees = getDisplayRotationDegrees();
-    if (frontCameraLensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
-      int result = (frontCameraSensorOrientation + displayDegrees) % 360;
-      return (360 - result) % 360;
-    }
-    return (frontCameraSensorOrientation - displayDegrees + 360) % 360;
-  }
-
   private int computeStillFrameRotationDegrees() {
     int displayDegrees = getDisplayRotationDegrees();
     if (frontCameraLensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
@@ -1382,14 +1238,7 @@ public final class MainActivity extends AppCompatActivity {
 
     int fps = secondFrameCounter.getAndSet(0);
     lastStatusUpdateMs = now;
-    runOnUiThread(() -> statusView.setText(getString(
-      R.string.status_running,
-      frame.width,
-      frame.height,
-      frame.rotationDegrees,
-      fps,
-      frame.timestampNs
-    )));
+    runOnUiThread(() -> statusView.setText(getString(R.string.status_running)));
   }
 
   private boolean tryReserveInferSlot() {
@@ -1417,21 +1266,15 @@ public final class MainActivity extends AppCompatActivity {
         RiskEventCandidate riskCandidate = updateRealtimeRisk(faceSignals, fatigue, uploadFrame.frame.timestampNs / 1_000_000L);
         rememberEvidenceFrame(uploadFrame);
         safeReportEdgeEvent(uploadFrame, fatigue, riskCandidate);
-        secondInferenceCounter.incrementAndGet();
-        maybeDumpQualityReplay(uploadFrame, result);
-        maybeSaveLocalRecognizedPhoto(uploadFrame, result);
 
         long finishedAt = SystemClock.elapsedRealtime();
         if (finishedAt - lastInferStatusUpdateMs >= 1000L) {
-          int inferFps = secondInferenceCounter.getAndSet(0);
           lastInferStatusUpdateMs = finishedAt;
-          runOnUiThread(() -> renderLocalInferStatus(result, fatigue, riskCandidate, inferFps));
+          runOnUiThread(() -> renderLocalInferStatus(fatigue, riskCandidate));
         }
       } catch (Exception error) {
         Log.e(TAG, "Local ONNX infer failed", error);
-        runOnUiThread(() -> fatigueStatusView.setText(
-          getString(R.string.status_local_error, formatError(error))
-        ));
+        runOnUiThread(() -> fatigueStatusView.setText(getString(R.string.status_local_error)));
       } finally {
         if (analyzerBitmap != modelBitmap) {
           analyzerBitmap.recycle();
@@ -1475,39 +1318,25 @@ public final class MainActivity extends AppCompatActivity {
   }
 
   private void renderLocalInferStatus(
-    @NonNull LocalOnnxDetector.Result result,
     @NonNull LocalFatigueAnalyzer.Result fatigue,
-    @Nullable RiskEventCandidate riskCandidate,
-    int inferFps
+    @Nullable RiskEventCandidate riskCandidate
   ) {
-    String base = getString(
-      R.string.status_local_running,
-      inferFps,
-      result.totalLatencyMs,
-      result.inferenceLatencyMs,
-      result.detections,
-      result.maxScore,
-      result.outputShape
-    );
     boolean quickFatigueActive = isQuickFatigueUiActive(fatigue);
     String fatigueLine;
     if (quickFatigueActive) {
-      fatigueLine = getString(R.string.status_fatigue_warning, resolveQuickFatigueSummary(fatigue));
+      fatigueLine = getString(R.string.status_fatigue_warning);
     } else if (riskCandidate != null && riskCandidate.getFatigueTriggered()) {
-      fatigueLine = getString(R.string.status_fatigue_warning, formatRiskCandidate(riskCandidate));
+      fatigueLine = getString(R.string.status_fatigue_warning);
     } else {
       fatigueLine = getString(R.string.status_fatigue_normal);
     }
     String distractionLine = riskCandidate != null && riskCandidate.getDistractionTriggered()
-      ? getString(R.string.status_distraction_warning, formatRiskCandidate(riskCandidate))
+      ? getString(R.string.status_distraction_warning)
       : getString(R.string.status_distraction_normal);
     fatigueStatusView.setText(
-      base
+      getString(R.string.status_local_running)
         + "\n" + fatigueLine
         + "\n" + distractionLine
-        + "\n" + fatigue.summaryText()
-        + "\n" + formatRiskScores(riskCandidate)
-        + "\n" + edgeEventStatusLine
     );
     maybeShowFatigueWarningToast(fatigue, riskCandidate);
     maybeShowDistractionWarningToast(riskCandidate);
@@ -1568,7 +1397,7 @@ public final class MainActivity extends AppCompatActivity {
     @Nullable RiskEventCandidate riskCandidate
   ) {
     EdgeEventReporter reporter = edgeEventReporter;
-    if (reporter == null) {
+    if (reporter == null || !captureStarted) {
       return;
     }
     if (handlePendingEdgeReport(uploadFrame, reporter)) {
@@ -1678,7 +1507,7 @@ public final class MainActivity extends AppCompatActivity {
       maybeReportEdgeEvent(uploadFrame, fatigue, riskCandidate);
     } catch (Exception error) {
       Log.e(TAG, "Edge event reporting failed", error);
-      edgeEventStatusLine = "事件上报：异常 " + error.getClass().getSimpleName();
+      edgeEventStatusLine = "事件上报：异常";
     }
   }
 
@@ -1912,11 +1741,10 @@ public final class MainActivity extends AppCompatActivity {
     @NonNull LocalFatigueAnalyzer.Result fatigue,
     @Nullable RiskEventCandidate riskCandidate
   ) {
-    String warningText;
     if (isQuickFatigueUiActive(fatigue)) {
-      warningText = resolveQuickFatigueSummary(fatigue);
+      // continue below
     } else if (riskCandidate != null && riskCandidate.getFatigueTriggered()) {
-      warningText = formatRiskCandidate(riskCandidate);
+      // continue below
     } else {
       return;
     }
@@ -1927,7 +1755,7 @@ public final class MainActivity extends AppCompatActivity {
     lastFatigueWarningToastMs = now;
     Toast.makeText(
       this,
-      getString(R.string.toast_fatigue_warning, warningText),
+      getString(R.string.toast_fatigue_warning),
       Toast.LENGTH_SHORT
     ).show();
     playFatigueWarningTone();
@@ -1944,63 +1772,10 @@ public final class MainActivity extends AppCompatActivity {
     lastDistractionWarningToastMs = now;
     Toast.makeText(
       this,
-      getString(R.string.toast_distraction_warning, formatRiskCandidate(riskCandidate)),
+      getString(R.string.toast_distraction_warning),
       Toast.LENGTH_SHORT
     ).show();
     playFatigueWarningTone();
-  }
-
-  @NonNull
-  private String formatRiskCandidate(@NonNull RiskEventCandidate candidate) {
-    String type =
-      candidate.getDominantRiskType() == RiskType.DISTRACTION ? "DISTRACTION" :
-        candidate.getDominantRiskType() == RiskType.FATIGUE ? "FATIGUE" : "NONE";
-    return candidate.getRiskLevel().name() + " " + type + " " + formatTriggerReasons(candidate);
-  }
-
-  @NonNull
-  private String formatRiskScores(@Nullable RiskEventCandidate candidate) {
-    if (candidate == null) {
-      return "risk=fatigue 0.00 distraction 0.00 level=NONE";
-    }
-    return String.format(
-      Locale.US,
-      "risk=fatigue %.2f distraction %.2f level=%s",
-      candidate.getFatigueScore(),
-      candidate.getDistractionScore(),
-      candidate.getRiskLevel().name()
-    );
-  }
-
-  @NonNull
-  private String formatTriggerReasons(@NonNull RiskEventCandidate candidate) {
-    if (candidate.getTriggerReasons().isEmpty()) {
-      return "stable";
-    }
-    List<String> labels = new ArrayList<>();
-    for (TriggerReason reason : candidate.getTriggerReasons()) {
-      switch (reason) {
-        case DISTRACTION_HEAD_OFF_ROAD_SUSTAINED:
-          labels.add("off_road");
-          break;
-        case DISTRACTION_HEAD_DOWN_SUSTAINED:
-          labels.add("head_down");
-          break;
-        case DISTRACTION_GAZE_OFFSET_SUSTAINED:
-          labels.add("gaze_offset");
-          break;
-        case FATIGUE_PERCLOS_SUSTAINED:
-          labels.add("perclos");
-          break;
-        case FATIGUE_YAWN_FREQUENT:
-          labels.add("yawn");
-          break;
-        default:
-          labels.add(reason.name().toLowerCase(Locale.US));
-          break;
-      }
-    }
-    return labels.toString();
   }
 
   private void playFatigueWarningTone() {
@@ -2055,179 +1830,6 @@ public final class MainActivity extends AppCompatActivity {
     }
   }
 
-  private void maybeDumpQualityReplay(@NonNull LocalUploadFrame frame, @NonNull LocalOnnxDetector.Result result) {
-    long now = SystemClock.elapsedRealtime();
-    if (now - lastReplayDumpMs < REPLAY_DUMP_INTERVAL_MS) {
-      return;
-    }
-    lastReplayDumpMs = now;
-
-    try {
-      long tsMs = frame.frame.timestampNs / 1_000_000L;
-      String prefix = String.format(Locale.US, "%d_%s", tsMs, frame.qualityTag);
-
-      File root = qualityReplayDir();
-      File rawDir = ensureSubDir(root, "raw");
-      File enhancedDir = ensureSubDir(root, "enhanced");
-      File modelDir = ensureSubDir(root, "model");
-      File overlayDir = ensureSubDir(root, "overlay");
-
-      writeBytes(frame.rawJpeg, new File(rawDir, prefix + "_raw.jpg"));
-      writeBytes(frame.enhancedJpeg, new File(enhancedDir, prefix + "_enhanced.jpg"));
-      writeBitmapJpeg(frame.modelBitmap, new File(modelDir, prefix + "_model.jpg"), REPLAY_JPEG_QUALITY);
-
-      Bitmap overlay = drawOverlay(frame.modelBitmap, result);
-      try {
-        writeBitmapJpeg(overlay, new File(overlayDir, prefix + "_overlay.jpg"), REPLAY_JPEG_QUALITY);
-      } finally {
-        overlay.recycle();
-      }
-    } catch (Exception error) {
-      Log.w(TAG, "Failed to dump quality replay", error);
-    }
-  }
-
-  private void maybeSaveLocalRecognizedPhoto(@NonNull LocalUploadFrame frame, @NonNull LocalOnnxDetector.Result result) {
-    if (result.detections <= 0) {
-      return;
-    }
-
-    try {
-      long tsMs = frame.frame.timestampNs / 1_000_000L;
-      String prefix = String.format(Locale.US, "%d_det%d_%.2f", tsMs, result.detections, result.maxScore);
-
-      File root = qualityReplayDir();
-      File detectedDir = ensureSubDir(root, "local_detected");
-
-      writeBitmapJpeg(frame.modelBitmap, new File(detectedDir, prefix + "_frame.jpg"), REPLAY_JPEG_QUALITY);
-      Bitmap overlay = drawOverlay(frame.modelBitmap, result);
-      try {
-        writeBitmapJpeg(overlay, new File(detectedDir, prefix + "_overlay.jpg"), REPLAY_JPEG_QUALITY);
-      } finally {
-        overlay.recycle();
-      }
-    } catch (Exception error) {
-      Log.w(TAG, "Failed to save local recognized photo", error);
-    }
-  }
-
-  private void maybeDumpProbeFrame() {
-    long now = SystemClock.elapsedRealtime();
-    if (now - lastProbeDumpMs < PROBE_DUMP_INTERVAL_MS) {
-      return;
-    }
-    lastProbeDumpMs = now;
-
-    try {
-      YuvFrame yuvFrame = getLatestYuvFrame();
-      if (yuvFrame == null) {
-        return;
-      }
-      EncodedJpeg jpeg = encodeNormalizedNv21ToJpeg(yuvFrame, REPLAY_JPEG_QUALITY);
-      long tsMs = yuvFrame.timestampNs / 1_000_000L;
-      String source = "camera2_yuv";
-
-      File root = qualityReplayDir();
-      File probeDir = ensureSubDir(root, "probe");
-      String filename = String.format(Locale.US, "%d_probe_%s.jpg", tsMs, source);
-      writeBytes(jpeg.jpeg, new File(probeDir, filename));
-    } catch (Exception error) {
-      Log.w(TAG, "Failed to dump probe frame", error);
-    }
-  }
-
-  @NonNull
-  private Bitmap drawOverlay(@NonNull Bitmap input, @NonNull LocalOnnxDetector.Result result) {
-    Bitmap overlay = input.copy(Bitmap.Config.ARGB_8888, true);
-    Canvas canvas = new Canvas(overlay);
-
-    Paint boxPaint = new Paint();
-    boxPaint.setStyle(Paint.Style.STROKE);
-    boxPaint.setStrokeWidth(3f);
-    boxPaint.setColor(Color.GREEN);
-
-    Paint textPaint = new Paint();
-    textPaint.setColor(Color.YELLOW);
-    textPaint.setTextSize(20f);
-    textPaint.setStyle(Paint.Style.FILL);
-
-    for (LocalOnnxDetector.Box box : result.boxes) {
-      boxPaint.setColor(colorForClass(box.classId));
-      canvas.drawRect(box.left, box.top, box.right, box.bottom, boxPaint);
-      String label = localClassName(box.classId) + String.format(Locale.US, " %.2f", box.score);
-      float textY = Math.max(18f, box.top - 6f);
-      canvas.drawText(label, box.left + 2f, textY, textPaint);
-    }
-    return overlay;
-  }
-
-  @NonNull
-  private String truncate(@NonNull String value, int maxChars) {
-    if (value.length() <= maxChars) {
-      return value;
-    }
-    return value.substring(0, Math.max(0, maxChars - 1)) + "...";
-  }
-
-  private int colorForClass(int classId) {
-    switch (classId) {
-      case 0:
-        return Color.RED;
-      case 1:
-        return Color.CYAN;
-      case 2:
-        return Color.GREEN;
-      case 3:
-        return Color.YELLOW;
-      default:
-        return Color.WHITE;
-    }
-  }
-
-  @NonNull
-  private String localClassName(int classId) {
-    if (classId >= 0 && classId < LOCAL_CLASS_NAMES.length) {
-      return LOCAL_CLASS_NAMES[classId];
-    }
-    return "cls" + classId;
-  }
-
-  private void writeBitmapJpeg(@NonNull Bitmap bitmap, @NonNull File output, int quality) throws Exception {
-    File parent = output.getParentFile();
-    if (parent != null && !parent.exists() && !parent.mkdirs()) {
-      throw new IOException("Failed to create replay directory");
-    }
-    try (FileOutputStream stream = new FileOutputStream(output, false)) {
-      boolean ok = bitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream);
-      if (!ok) {
-        throw new IOException("Failed to compress bitmap");
-      }
-      stream.flush();
-    }
-  }
-
-  private void writeBytes(@NonNull byte[] data, @NonNull File output) throws Exception {
-    File parent = output.getParentFile();
-    if (parent != null && !parent.exists() && !parent.mkdirs()) {
-      throw new IOException("Failed to create replay directory");
-    }
-    try (FileOutputStream stream = new FileOutputStream(output, false)) {
-      stream.write(data);
-      stream.flush();
-    }
-  }
-
-  @NonNull
-  private File qualityReplayDir() {
-    File externalDir = getExternalFilesDir(null);
-    File root = externalDir == null ? getFilesDir() : externalDir;
-    File dir = new File(root, "quality_replay");
-    if (!dir.exists()) {
-      dir.mkdirs();
-    }
-    return dir;
-  }
-
   @NonNull
   private File evidenceArchiveDir() {
     File externalDir = getExternalFilesDir(null);
@@ -2270,8 +1872,6 @@ public final class MainActivity extends AppCompatActivity {
   }
 
   private void resetInferSession() {
-    inferSessionId = "sess-" + System.currentTimeMillis();
-    secondInferenceCounter.set(0);
     lastInferStatusUpdateMs = 0L;
     lastWaitingStatusMs = 0L;
     updateInferIdleStatus();
@@ -2289,7 +1889,6 @@ public final class MainActivity extends AppCompatActivity {
     lastEdgeEventScheduledElapsedMs = 0L;
     pendingEdgeReport = null;
     lastQuickFatigueDetectedElapsedMs = 0L;
-    lastQuickFatigueEventSummary = "fatigue_normal";
   }
 
   private void updateQuickFatigueUiState(@NonNull LocalFatigueAnalyzer.Result fatigue) {
@@ -2301,7 +1900,6 @@ public final class MainActivity extends AppCompatActivity {
       quickFatigueCandidateStartedElapsedMs = now;
     }
     lastQuickFatigueDetectedElapsedMs = now;
-    lastQuickFatigueEventSummary = fatigue.eventSummary;
   }
 
   private boolean isQuickFatigueUiActive(@NonNull LocalFatigueAnalyzer.Result fatigue) {
@@ -2313,14 +1911,6 @@ public final class MainActivity extends AppCompatActivity {
       return false;
     }
     return SystemClock.elapsedRealtime() - lastDetectedAt <= QUICK_FATIGUE_UI_HOLD_MS;
-  }
-
-  @NonNull
-  private String resolveQuickFatigueSummary(@NonNull LocalFatigueAnalyzer.Result fatigue) {
-    if (fatigue.drowsy) {
-      return fatigue.eventSummary;
-    }
-    return lastQuickFatigueEventSummary;
   }
 
   private boolean shouldReportQuickFatigueFallback(@NonNull LocalFatigueAnalyzer.Result fatigue) {
@@ -2340,11 +1930,7 @@ public final class MainActivity extends AppCompatActivity {
   }
 
   private void updateInferIdleStatus() {
-    fatigueStatusView.setText(getString(
-      R.string.status_local_idle,
-      LOCAL_MODEL_ASSET_PATH,
-      inferSessionId
-    ));
+    fatigueStatusView.setText(getString(R.string.status_local_idle));
   }
 
   private void maybeUpdateWaitingStatus() {
@@ -2353,7 +1939,7 @@ public final class MainActivity extends AppCompatActivity {
       return;
     }
     lastWaitingStatusMs = now;
-    fatigueStatusView.setText("本地疲劳快检：等待相机帧");
+    fatigueStatusView.setText("检测模块：等待画面");
   }
 
   @NonNull
@@ -2430,229 +2016,6 @@ public final class MainActivity extends AppCompatActivity {
     }
   }
 
-  @NonNull
-  private String formatError(@NonNull Throwable error) {
-    StringBuilder builder = new StringBuilder(error.getClass().getSimpleName());
-    Throwable cursor = error;
-    int depth = 0;
-    while (cursor != null && depth < 4) {
-      String message = cursor.getMessage();
-      if (message != null && !message.trim().isEmpty()) {
-        if (depth == 0) {
-          builder.append(": ").append(message);
-        } else {
-          builder.append(" | cause").append(depth).append(": ").append(message);
-        }
-      }
-      cursor = cursor.getCause();
-      depth++;
-    }
-    return builder.toString();
-  }
-
-  private void toggleRecording() {
-    if (!captureStarted) {
-      return;
-    }
-    if (isRecording) {
-      stopRecordingInternal(true);
-      return;
-    }
-    startRecordingInternal();
-  }
-
-  private void startRecordingInternal() {
-    Handler handler = cameraHandler;
-    if (handler == null || cameraDevice == null) {
-      Toast.makeText(this, R.string.recording_failed, Toast.LENGTH_SHORT).show();
-      return;
-    }
-    handler.post(() -> {
-      try {
-        prepareMediaRecorder();
-        createCaptureSession(true, true);
-      } catch (Exception error) {
-        releaseMediaRecorder();
-        runOnUiThread(() -> Toast.makeText(this, R.string.recording_failed, Toast.LENGTH_SHORT).show());
-      }
-    });
-  }
-
-  private void startMediaRecorderAfterSessionReady() {
-    MediaRecorder recorder = mediaRecorder;
-    if (recorder == null) {
-      return;
-    }
-    try {
-      recorder.start();
-      isRecording = true;
-      stopPreviewUploadLoop();
-      runOnUiThread(() -> {
-        updateRecordButton();
-        String path = recordingFile == null ? "-" : recordingFile.getAbsolutePath();
-        fatigueStatusView.setText("录制中：已暂停分析流（防止绿屏）");
-        Toast.makeText(this, getString(R.string.recording_started, path), Toast.LENGTH_LONG).show();
-      });
-    } catch (Exception error) {
-      isRecording = false;
-      runOnUiThread(() -> Toast.makeText(this, R.string.recording_failed, Toast.LENGTH_SHORT).show());
-    }
-  }
-
-  private void stopRecordingInternal(boolean recreatePreviewSession) {
-    Handler handler = cameraHandler;
-    if (handler == null) {
-      return;
-    }
-    handler.post(() -> {
-      if (!isRecording && mediaRecorder == null) {
-        return;
-      }
-
-      File output = recordingFile;
-      try {
-        MediaRecorder recorder = mediaRecorder;
-        if (recorder != null && isRecording) {
-          recorder.stop();
-        }
-      } catch (Exception stopError) {
-        if (output != null && output.exists()) {
-          output.delete();
-        }
-      } finally {
-        isRecording = false;
-        releaseMediaRecorder();
-        runOnUiThread(() -> {
-          updateRecordButton();
-          updateInferIdleStatus();
-          if (output != null && output.exists()) {
-            Toast.makeText(this, getString(R.string.recording_stopped, output.getAbsolutePath()), Toast.LENGTH_LONG).show();
-          }
-        });
-        if (recreatePreviewSession && captureStarted) {
-          createCaptureSession(false, false);
-          startPreviewUploadLoop();
-        }
-      }
-    });
-  }
-
-  private void prepareMediaRecorder() throws IOException {
-    File output = newRecordingFile();
-    MediaRecorder recorder = mediaRecorder;
-    if (recorder == null) {
-      recorder = new MediaRecorder();
-      mediaRecorder = recorder;
-    } else {
-      recorder.reset();
-    }
-
-    recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
-    recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
-    recorder.setOutputFile(output.getAbsolutePath());
-    recorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
-    recorder.setVideoFrameRate(24);
-    int targetBitrate = Math.max(2_000_000, Math.min(12_000_000, recordWidth * recordHeight * 5));
-    recorder.setVideoEncodingBitRate(targetBitrate);
-    recorder.setVideoSize(recordWidth, recordHeight);
-    recorder.setOrientationHint(computeVideoOrientationHint());
-    recorder.prepare();
-    recorderSurface = recorder.getSurface();
-    recordingFile = output;
-  }
-
-  private void releaseMediaRecorder() {
-    MediaRecorder recorder = mediaRecorder;
-    mediaRecorder = null;
-    recorderSurface = null;
-    if (recorder == null) {
-      return;
-    }
-    try {
-      recorder.reset();
-    } catch (Exception ignored) {
-    }
-    try {
-      recorder.release();
-    } catch (Exception ignored) {
-    }
-  }
-
-  @NonNull
-  private File recordingsDir() {
-    File externalDir = getExternalFilesDir(null);
-    File root = externalDir == null ? getFilesDir() : externalDir;
-    File dir = new File(root, "recordings");
-    if (!dir.exists()) {
-      dir.mkdirs();
-    }
-    return dir;
-  }
-
-  @NonNull
-  private File newRecordingFile() throws IOException {
-    String ts = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
-    File output = new File(recordingsDir(), "capture_" + ts + ".mp4");
-    if (output.exists() && !output.delete()) {
-      throw new IOException("Failed to replace existing output file");
-    }
-    return output;
-  }
-
-  private void openRecordingsDirectory() {
-    openExternalFilesSubDirectory("recordings", recordingsDir());
-  }
-
-  private void openExternalFilesSubDirectory(@NonNull String subdir, @NonNull File fallbackDir) {
-    String docId = "primary:Android/data/" + getPackageName() + "/files/" + subdir;
-    Uri initialUri = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", docId);
-
-    Intent directOpenIntent = new Intent(Intent.ACTION_VIEW);
-    directOpenIntent.setDataAndType(initialUri, DocumentsContract.Document.MIME_TYPE_DIR);
-    directOpenIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-    directOpenIntent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-
-    if (canHandleIntent(directOpenIntent)) {
-      try {
-        startActivity(directOpenIntent);
-        return;
-      } catch (ActivityNotFoundException ignored) {
-      } catch (SecurityException ignored) {
-      }
-    }
-
-    Intent treeIntent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-    treeIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-    treeIntent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-    treeIntent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      treeIntent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
-    }
-
-    if (canHandleIntent(treeIntent)) {
-      try {
-        startActivity(treeIntent);
-        return;
-      } catch (ActivityNotFoundException ignored) {
-      } catch (SecurityException ignored) {
-      }
-    }
-
-    Toast.makeText(
-      this,
-      getString(R.string.open_recordings_fallback, fallbackDir.getAbsolutePath()),
-      Toast.LENGTH_LONG
-    ).show();
-  }
-
-  private void updateRecordButton() {
-    recordButton.setText(isRecording ? R.string.record_stop : R.string.record_start);
-  }
-
-  private boolean canHandleIntent(@NonNull Intent intent) {
-    return intent.resolveActivity(getPackageManager()) != null;
-  }
-
   private void closeCameraResources() {
     previewRequestBuilder = null;
     aeAwbStableFrames = 0;
@@ -2684,38 +2047,23 @@ public final class MainActivity extends AppCompatActivity {
     }
     evidenceFrameBuffer.clear();
     pendingEdgeReport = null;
-
-    releaseMediaRecorder();
-    isRecording = false;
   }
 
   private static final class LocalUploadFrame {
     @NonNull
     final FrameData frame;
     @NonNull
-    final byte[] rawJpeg;
-    @NonNull
-    final byte[] enhancedJpeg;
-    @NonNull
     final Bitmap modelBitmap;
     final long capturedAtMs;
-    @NonNull
-    final String qualityTag;
 
     LocalUploadFrame(
       @NonNull FrameData frame,
-      @NonNull byte[] rawJpeg,
-      @NonNull byte[] enhancedJpeg,
       @NonNull Bitmap modelBitmap,
-      long capturedAtMs,
-      @NonNull String qualityTag
+      long capturedAtMs
     ) {
       this.frame = frame;
-      this.rawJpeg = rawJpeg;
-      this.enhancedJpeg = enhancedJpeg;
       this.modelBitmap = modelBitmap;
       this.capturedAtMs = capturedAtMs;
-      this.qualityTag = qualityTag;
     }
   }
 

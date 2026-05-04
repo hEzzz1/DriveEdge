@@ -71,7 +71,7 @@ public final class LocalFatigueAnalyzerTest {
   }
 
   @Test
-  public void distractionAnalyzerMapsPoseSignalsIntoTemporalDetections() {
+  public void distractionAnalyzerOnlyMapsStrongDistractionSignalsIntoTemporalDetections() {
     LocalDistractionAnalyzer analyzer = new LocalDistractionAnalyzer();
     LocalFaceSignalAnalyzer.Result faceSignals =
       new LocalFaceSignalAnalyzer.Result(
@@ -79,11 +79,11 @@ public final class LocalFatigueAnalyzerTest {
         0.10f,
         0.05f,
         0.75f,
-        0.65f,
+        0.85f,
         0.70f,
-        0.70f,
+        0.86f,
         0.20f,
-        0.40f,
+        0.72f,
         0.10f,
         0.50f,
         8
@@ -95,5 +95,31 @@ public final class LocalFatigueAnalyzerTest {
     assertTrue(detections.stream().anyMatch(item -> "head_left".equals(item.getLabel())));
     assertTrue(detections.stream().anyMatch(item -> "look_left".equals(item.getLabel())));
     assertFalse(detections.stream().anyMatch(item -> "eye_closed".equals(item.getLabel())));
+  }
+
+  @Test
+  public void distractionAnalyzerIgnoresNormalMirrorGlances() {
+    LocalDistractionAnalyzer analyzer = new LocalDistractionAnalyzer();
+    LocalFaceSignalAnalyzer.Result faceSignals =
+      new LocalFaceSignalAnalyzer.Result(
+        1,
+        0.10f,
+        0.05f,
+        0.20f,
+        0.45f,
+        0.45f,
+        0.45f,
+        0.15f,
+        0.20f,
+        0.60f,
+        0.30f,
+        8
+      );
+
+    List<DetectionResult> detections = analyzer.toTemporalDetections(faceSignals, 1234L);
+
+    assertFalse(detections.stream().anyMatch(item -> "head_left".equals(item.getLabel())));
+    assertFalse(detections.stream().anyMatch(item -> "look_left".equals(item.getLabel())));
+    assertTrue(detections.stream().anyMatch(item -> "head_forward".equals(item.getLabel())));
   }
 }

@@ -10,6 +10,11 @@ import java.util.Collections;
 import java.util.List;
 
 public final class LocalDistractionAnalyzer {
+  private static final float HEAD_DOWN_CANDIDATE_THRESHOLD = 0.62f;
+  private static final float HEAD_YAW_CANDIDATE_THRESHOLD = 0.78f;
+  private static final float GAZE_DOWN_CANDIDATE_THRESHOLD = 0.70f;
+  private static final float GAZE_SIDE_CANDIDATE_THRESHOLD = 0.82f;
+
   @NonNull
   public List<DetectionResult> toTemporalDetections(
     @NonNull LocalFaceSignalAnalyzer.Result faceSignals,
@@ -20,10 +25,12 @@ public final class LocalDistractionAnalyzer {
     }
 
     List<DetectionResult> detections = new ArrayList<>(6);
-    if (faceSignals.headPitchScore >= 0.15f) {
+    if (faceSignals.headPitchScore >= HEAD_DOWN_CANDIDATE_THRESHOLD) {
       detections.add(detection("head_down", faceSignals.headPitchScore, frameTimestampMs));
     }
-    if (faceSignals.headYawScore >= 0.15f) {
+    // Short side glances are common when checking mirrors or changing lanes; only strong yaw
+    // is forwarded to the temporal engine, which still requires sustained evidence.
+    if (faceSignals.headYawScore >= HEAD_YAW_CANDIDATE_THRESHOLD) {
       detections.add(detection(
         faceSignals.yawSignedScore >= 0f ? "head_left" : "head_right",
         faceSignals.headYawScore,
@@ -32,10 +39,10 @@ public final class LocalDistractionAnalyzer {
     }
     detections.add(detection("head_forward", Math.max(0.15f, faceSignals.headForwardScore), frameTimestampMs));
 
-    if (faceSignals.gazeDownScore >= 0.15f) {
+    if (faceSignals.gazeDownScore >= GAZE_DOWN_CANDIDATE_THRESHOLD) {
       detections.add(detection("look_down", faceSignals.gazeDownScore, frameTimestampMs));
     }
-    if (faceSignals.gazeLeftScore >= 0.15f || faceSignals.gazeRightScore >= 0.15f) {
+    if (faceSignals.gazeLeftScore >= GAZE_SIDE_CANDIDATE_THRESHOLD || faceSignals.gazeRightScore >= GAZE_SIDE_CANDIDATE_THRESHOLD) {
       detections.add(detection(
         faceSignals.gazeLeftScore >= faceSignals.gazeRightScore ? "look_left" : "look_right",
         Math.max(faceSignals.gazeLeftScore, faceSignals.gazeRightScore),

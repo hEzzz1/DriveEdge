@@ -218,14 +218,9 @@ public final class SignInActivity extends AppCompatActivity {
     EdgeLocalContext context = edgeLocalContext;
     edgeContextView.setText(getString(
       R.string.edge_context_format,
-      EdgeFlowController.displayValue(context.enterpriseName, context.enterpriseId),
-      edgeFlowController.displayBindStatus(context),
-      EdgeFlowController.displayValue(context.fleetName, context.fleetId),
       EdgeFlowController.displayValue(context.vehiclePlateNumber, context.vehicleId),
       EdgeFlowController.displayDriverValue(context),
-      EdgeFlowController.displayText(context.signedInAt),
-      EdgeFlowController.displayText(context.configVersion),
-      EdgeFlowController.displayText(context.lastSyncAt),
+      edgeFlowController.displayBindStatus(context),
       "事件上报：待触发"
     ));
     signInSubtitleView.setText(edgeFlowController.resolveStatusMessage(context));

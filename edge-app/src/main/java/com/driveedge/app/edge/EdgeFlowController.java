@@ -104,7 +104,7 @@ public final class EdgeFlowController {
       case CAPTURE:
         return "设备采集中";
       case SIGN_IN:
-        return "设备已完成企业绑定，请司机签到";
+        return "设备已完成企业绑定，请驾驶员签到";
       case WAITING_VEHICLE:
         return "设备已绑定企业，待分配车辆";
       case CLAIM_ENTERPRISE:
