@@ -1,10 +1,12 @@
 package com.driveedge.uploader
 
 import com.driveedge.event.center.EdgeEvent
+import com.driveedge.event.center.EdgeEventEvidence
 import com.driveedge.event.center.UploadStatus
 import com.driveedge.risk.engine.RiskLevel
 import com.driveedge.risk.engine.RiskType
 import com.driveedge.risk.engine.TriggerReason
+import java.io.File
 import java.time.Duration
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -46,6 +48,80 @@ class EventUploaderTest {
     assertEquals(200, receipt.httpStatus)
     assertFalse(receipt.isTransportFailure)
     assertEquals(UploadFailureCategory.NONE, receipt.failureCategory)
+  }
+
+  @Test
+  fun `upload sends evidence first and replaces evidence url with server path`() {
+    val transport =
+      RecordingTransport(
+        nextEvidenceResponse =
+          TransportResponse(
+            statusCode = 200,
+            body = """{"code":0,"message":"ok","traceId":"trace-evidence","data":{"evidenceUrl":"alert-evidence:events/evt-1001.jpg","evidenceMimeType":"image/jpeg","evidenceType":"KEY_FRAME","evidenceCapturedAtMs":1710000000000}}""",
+          ),
+        nextResponse =
+          TransportResponse(
+            statusCode = 200,
+            body = """{"code":0,"message":"ok","traceId":"trace-10002","data":{}}""",
+          ),
+      )
+    val uploader =
+      EventUploader(
+        config =
+          UploaderConfig(
+            baseUrl = "https://driveserver.local/",
+            deviceCode = "DEV-001",
+            deviceToken = "token-001",
+          ),
+        transport = transport,
+      )
+
+    val receipt = uploader.upload(sampleEvent(withEvidence = true))
+
+    assertEquals("https://driveserver.local/api/v1/events/evidence", transport.lastEvidenceEndpointUrl)
+    assertEquals("trace-10002", receipt.traceId)
+    assertEquals(0, receipt.code)
+    assertNotNull(transport.lastEvidenceBodyBytes)
+    assertTrue(transport.lastRequestBody!!.contains("\"evidenceUrl\":\"alert-evidence:events/evt-1001.jpg\""))
+  }
+
+  @Test
+  fun `upload sends zip evidence from local file`() {
+    val evidenceFile = File.createTempFile("driveedge-sequence", ".zip")
+    evidenceFile.writeBytes(byteArrayOf(0x50, 0x4b, 0x03, 0x04))
+    val transport =
+      RecordingTransport(
+        nextEvidenceResponse =
+          TransportResponse(
+            statusCode = 200,
+            body = """{"code":0,"message":"ok","data":{"evidenceUrl":"alert-evidence:events/evt-1001.zip","evidenceMimeType":"application/zip","evidenceType":"FRAME_SEQUENCE","evidenceCapturedAtMs":1710000003050}}""",
+          ),
+        nextResponse =
+          TransportResponse(
+            statusCode = 200,
+            body = """{"code":0,"message":"ok","traceId":"trace-zip","data":{}}""",
+          ),
+      )
+    val uploader =
+      EventUploader(
+        config = UploaderConfig(baseUrl = "https://driveserver.local/", deviceCode = "DEV-001", deviceToken = "token-001"),
+        transport = transport,
+      )
+
+    try {
+      val receipt = uploader.upload(sampleEvent(withZipEvidenceFile = evidenceFile))
+
+      assertEquals(0, receipt.code)
+      assertEquals("application/zip", transport.lastEvidenceMimeType)
+      assertEquals(evidenceFile.name, transport.lastEvidenceFilename)
+      assertTrue(transport.lastEvidenceBodyBytes!!.contentEquals(byteArrayOf(0x50, 0x4b, 0x03, 0x04)))
+      assertEquals("evt-1001", transport.lastEventId)
+      assertTrue(transport.lastEndpointUrl!!.endsWith("/api/v1/events"))
+      assertTrue(transport.lastEvidenceEndpointUrl!!.endsWith("/api/v1/events/evidence"))
+      assertTrue(transport.lastRequestBody!!.contains("\"evidenceUrl\":\"alert-evidence:events/evt-1001.zip\""))
+    } finally {
+      evidenceFile.delete()
+    }
   }
 
   @Test
@@ -132,6 +208,18 @@ class EventUploaderTest {
   }
 
   private fun sampleEvent(): EdgeEvent =
+    sampleEvent(withEvidence = false)
+
+  private fun sampleEvent(withEvidence: Boolean): EdgeEvent =
+    sampleEvent(withEvidence = withEvidence, withZipEvidenceFile = null)
+
+  private fun sampleEvent(withZipEvidenceFile: File): EdgeEvent =
+    sampleEvent(withEvidence = false, withZipEvidenceFile = withZipEvidenceFile)
+
+  private fun sampleEvent(
+    withEvidence: Boolean,
+    withZipEvidenceFile: File?,
+  ): EdgeEvent =
     EdgeEvent(
       eventId = "evt-1001",
       deviceCode = "DEV-001",
@@ -156,10 +244,29 @@ class EventUploaderTest {
       windowStartMs = 1_710_000_000_000L,
       windowEndMs = 1_710_000_003_000L,
       createdAtMs = 1_710_000_003_100L,
+      evidence =
+        when {
+          withZipEvidenceFile != null ->
+            EdgeEventEvidence(
+              type = "FRAME_SEQUENCE",
+              url = withZipEvidenceFile.toURI().toString(),
+              mimeType = "application/zip",
+              capturedAtMs = 1_710_000_003_050L,
+            )
+          withEvidence ->
+            EdgeEventEvidence(
+              type = "KEY_FRAME",
+              url = "data:image/jpeg;base64,ZmFrZS1qcGVn",
+              mimeType = "image/jpeg",
+              capturedAtMs = 1_710_000_003_050L,
+            )
+          else -> null
+        },
     )
 
   private class RecordingTransport(
     private val nextResponse: TransportResponse? = null,
+    private val nextEvidenceResponse: TransportResponse? = null,
     private val nextError: RuntimeException? = null,
   ) : EventsApiTransport {
     var lastEndpointUrl: String? = null
@@ -173,6 +280,14 @@ class EventUploaderTest {
     var lastEventIdHeaderName: String? = null
       private set
     var lastRequestBody: String? = null
+      private set
+    var lastEvidenceEndpointUrl: String? = null
+      private set
+    var lastEvidenceBodyBytes: ByteArray? = null
+      private set
+    var lastEvidenceMimeType: String? = null
+      private set
+    var lastEvidenceFilename: String? = null
       private set
     var lastTimeoutMs: Long? = null
       private set
@@ -197,6 +312,30 @@ class EventUploaderTest {
 
       nextError?.let { throw it }
       return nextResponse ?: error("nextResponse must be provided when nextError is null")
+    }
+
+    override fun postEvidence(
+      endpointUrl: String,
+      deviceCode: String,
+      deviceToken: String,
+      eventId: String,
+      evidenceType: String,
+      evidenceMimeType: String,
+      evidenceCapturedAtMs: Long,
+      filename: String,
+      bytes: ByteArray,
+      timeout: Duration,
+    ): TransportResponse {
+      lastEvidenceEndpointUrl = endpointUrl
+      lastDeviceToken = deviceToken
+      lastEventId = eventId
+      lastEvidenceFilename = filename
+      lastEvidenceMimeType = evidenceMimeType
+      lastEvidenceBodyBytes = bytes
+      lastTimeoutMs = timeout.toMillis()
+
+      nextError?.let { throw it }
+      return nextEvidenceResponse ?: error("nextEvidenceResponse must be provided when nextError is null")
     }
   }
 }

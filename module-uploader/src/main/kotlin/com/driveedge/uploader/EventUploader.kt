@@ -1,16 +1,21 @@
 package com.driveedge.uploader
 
 import com.driveedge.event.center.EdgeEvent
+import com.driveedge.event.center.EdgeEventEvidence
+import java.io.File
+import java.net.URI
+import java.util.Base64
 
 class EventUploader
   @JvmOverloads
   constructor(
-  private val config: UploaderConfig,
-  private val transport: EventsApiTransport = HttpEventsApiTransport(connectTimeout = config.connectTimeout),
-) {
+    private val config: UploaderConfig,
+    private val transport: EventsApiTransport = HttpEventsApiTransport(connectTimeout = config.connectTimeout),
+  ) {
   fun upload(event: EdgeEvent): UploadReceipt {
-    val payload = EventPayloadMapper.toJson(event)
     return try {
+      val preparedEvent = uploadEvidenceIfNeeded(event)
+      val payload = EventPayloadMapper.toJson(preparedEvent)
       val response =
         transport.postEvent(
           endpointUrl = config.endpointUrl(),
@@ -23,6 +28,8 @@ class EventUploader
           timeout = config.requestTimeout,
         )
       toReceipt(eventId = event.eventId, response = response)
+    } catch (error: EvidenceUploadFailure) {
+      error.receipt
     } catch (error: TransportException) {
       UploadReceipt(
         eventId = event.eventId,
@@ -46,6 +53,58 @@ class EventUploader
         failureCategory = UploadFailureCategory.UNKNOWN,
       )
     }
+  }
+
+  private fun uploadEvidenceIfNeeded(event: EdgeEvent): EdgeEvent {
+    val evidence = event.evidence ?: return event
+    val source =
+      try {
+        EvidencePayloadSource.from(evidence, config.maxEvidenceBytes)
+      } catch (error: IllegalArgumentException) {
+        throw EvidenceUploadFailure(
+          UploadReceipt(
+            eventId = event.eventId,
+            code = 40001,
+            traceId = null,
+            message = error.message ?: "invalid evidence payload",
+            httpStatus = null,
+            responseBody = null,
+            transportError = error.message ?: "invalid evidence payload",
+            failureCategory = UploadFailureCategory.CLIENT,
+          ),
+        )
+      } ?: return event
+
+    val response =
+      transport.postEvidence(
+        endpointUrl = config.evidenceEndpointUrl(),
+        deviceCode = config.deviceCode,
+        deviceToken = config.deviceToken,
+        eventId = event.eventId,
+        evidenceType = evidence.type,
+        evidenceMimeType = source.mimeType,
+        evidenceCapturedAtMs = evidence.capturedAtMs,
+        filename = source.filename,
+        bytes = source.bytes,
+        timeout = config.requestTimeout,
+      )
+    val receipt = toReceipt(event.eventId, response)
+    if (receipt.code != 0) {
+      throw EvidenceUploadFailure(receipt)
+    }
+    val serverEvidenceUrl = UnifiedResponseParser.parseStringField(response.body, "evidenceUrl")
+    val serverEvidenceMimeType = UnifiedResponseParser.parseStringField(response.body, "evidenceMimeType")
+    val serverEvidenceType = UnifiedResponseParser.parseStringField(response.body, "evidenceType")
+    val serverCapturedAtMs = UnifiedResponseParser.parseLongField(response.body, "evidenceCapturedAtMs")
+    return event.copy(
+      evidence =
+        evidence.copy(
+          url = serverEvidenceUrl ?: evidence.url,
+          mimeType = serverEvidenceMimeType ?: evidence.mimeType,
+          type = serverEvidenceType ?: evidence.type,
+          capturedAtMs = serverCapturedAtMs ?: evidence.capturedAtMs,
+        ),
+    )
   }
 
   private fun toReceipt(
@@ -87,6 +146,99 @@ class EventUploader
   }
 }
 
+private class EvidenceUploadFailure(
+  val receipt: UploadReceipt,
+) : RuntimeException(receipt.message)
+
+private data class EvidencePayloadSource(
+  val mimeType: String,
+  val filename: String,
+  val bytes: ByteArray,
+) {
+  companion object {
+    fun from(
+      evidence: EdgeEventEvidence,
+      maxBytes: Long,
+    ): EvidencePayloadSource? {
+      val url = evidence.url.trim()
+      if (url.startsWith("data:", ignoreCase = true)) {
+        return fromDataUri(url, evidence.mimeType, maxBytes)
+      }
+      if (url.startsWith("file:", ignoreCase = true)) {
+        return fromFilePath(URI(url), evidence.mimeType, maxBytes)
+      }
+      if (url.startsWith("/")) {
+        return fromFilePath(File(url).toURI(), evidence.mimeType, maxBytes)
+      }
+      return null
+    }
+
+    private fun fromDataUri(
+      value: String,
+      fallbackMimeType: String,
+      maxBytes: Long,
+    ): EvidencePayloadSource {
+      val commaIndex = value.indexOf(',')
+      require(commaIndex > 5) { "invalid data uri" }
+      val metadata = value.substring(5, commaIndex)
+      val data = value.substring(commaIndex + 1)
+      var mimeType: String? = null
+      var base64Encoded = false
+      metadata.split(';').forEach { token ->
+        when {
+          token.equals("base64", ignoreCase = true) -> base64Encoded = true
+          token.contains('/') -> mimeType = token.trim().lowercase()
+        }
+      }
+      val normalizedMimeType = (mimeType ?: fallbackMimeType).ifBlank { "application/octet-stream" }.lowercase()
+      val bytes =
+        if (base64Encoded) {
+          Base64.getDecoder().decode(data)
+        } else {
+          data.toByteArray(Charsets.UTF_8)
+        }
+      require(bytes.size.toLong() <= maxBytes) { "evidence too large" }
+      return EvidencePayloadSource(
+        mimeType = normalizedMimeType,
+        filename = "evidence.${extensionFor(normalizedMimeType)}",
+        bytes = bytes,
+      )
+    }
+
+    private fun fromFilePath(
+      uri: URI,
+      fallbackMimeType: String,
+      maxBytes: Long,
+    ): EvidencePayloadSource? {
+      val file = File(uri)
+      if (!file.exists() || !file.isFile) {
+        return null
+      }
+      val bytes = file.readBytes()
+      require(bytes.size.toLong() <= maxBytes) { "evidence too large" }
+      val mimeType = fallbackMimeType.ifBlank { "application/octet-stream" }.lowercase()
+      return EvidencePayloadSource(
+        mimeType = mimeType,
+        filename = file.name.ifBlank { "evidence.${extensionFor(mimeType)}" },
+        bytes = bytes,
+      )
+    }
+
+    private fun extensionFor(mimeType: String): String =
+      when (mimeType.lowercase()) {
+        "image/jpeg" -> "jpg"
+        "image/png" -> "png"
+        "image/webp" -> "webp"
+        "video/mp4" -> "mp4"
+        "video/webm" -> "webm"
+        "video/quicktime" -> "mov"
+        "application/zip" -> "zip"
+        "application/x-zip-compressed" -> "zip"
+        else -> "bin"
+      }
+  }
+}
+
 private object EventPayloadMapper {
   fun toJson(event: EdgeEvent): String {
     val fields = linkedMapOf<String, String>()
@@ -111,6 +263,12 @@ private object EventPayloadMapper {
     fields["windowStartMs"] = event.windowStartMs.toString()
     fields["windowEndMs"] = event.windowEndMs.toString()
     fields["createdAtMs"] = event.createdAtMs.toString()
+    event.evidence?.let { evidence ->
+      fields["evidenceType"] = evidence.type.toJsonString()
+      fields["evidenceUrl"] = evidence.url.toJsonString()
+      fields["evidenceMimeType"] = evidence.mimeType.toJsonString()
+      fields["evidenceCapturedAtMs"] = evidence.capturedAtMs.toString()
+    }
 
     return buildString {
       append('{')
@@ -152,6 +310,14 @@ private object UnifiedResponseParser {
   ): Int? {
     val regex = Regex("\\\"${Regex.escape(fieldName)}\\\"\\s*:\\s*(-?\\d+)")
     return regex.find(body)?.groupValues?.get(1)?.toIntOrNull()
+  }
+
+  fun parseLongField(
+    body: String,
+    fieldName: String,
+  ): Long? {
+    val regex = Regex("\\\"${Regex.escape(fieldName)}\\\"\\s*:\\s*(-?\\d+)")
+    return regex.find(body)?.groupValues?.get(1)?.toLongOrNull()
   }
 
   fun parseStringField(

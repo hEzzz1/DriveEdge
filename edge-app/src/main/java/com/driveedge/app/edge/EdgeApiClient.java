@@ -5,6 +5,7 @@ import androidx.annotation.Nullable;
 
 import com.driveedge.app.BuildConfig;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -15,6 +16,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 public final class EdgeApiClient {
   private static final int SUCCESS_CODE = 0;
@@ -57,6 +60,49 @@ public final class EdgeApiClient {
   }
 
   @NonNull
+  public EdgeLocalContext fetchEdgeConfig(@NonNull EdgeLocalContext baseContext) throws Exception {
+    JSONObject data = request(
+      "/api/v1/edge/config",
+      "GET",
+      required(baseContext.deviceCode),
+      required(baseContext.deviceToken),
+      null
+    );
+    EdgeLocalContext context = baseContext.copy();
+    context.runtimeConfigJson = data.toString();
+    context.runtimeConfigVersion = firstNonBlank(readString(data, "configVersion"), context.runtimeConfigVersion);
+    context.configVersion = firstNonBlank(context.runtimeConfigVersion, context.configVersion);
+    context.lastSyncAt = Instant.now().toString();
+    return context;
+  }
+
+  @NonNull
+  public EdgeLocalContext submitTelemetry(@NonNull EdgeLocalContext baseContext, @NonNull EdgeTelemetrySnapshot snapshot) throws Exception {
+    JSONObject request = new JSONObject();
+    request.put("uploadQueueSize", snapshot.uploadQueueSize);
+    if (snapshot.uploadLastFailureClass != null && !snapshot.uploadLastFailureClass.trim().isEmpty()) {
+      request.put("uploadLastFailureClass", snapshot.uploadLastFailureClass.trim());
+    }
+    if (snapshot.uploadLastErrorMessage != null && !snapshot.uploadLastErrorMessage.trim().isEmpty()) {
+      request.put("uploadLastErrorMessage", snapshot.uploadLastErrorMessage.trim());
+    }
+    if (snapshot.uploadLastSuccessAt != null) {
+      request.put("uploadLastSuccessAt", snapshot.uploadLastSuccessAt);
+    }
+    if (snapshot.uploadLastFailedAt != null) {
+      request.put("uploadLastFailedAt", snapshot.uploadLastFailedAt);
+    }
+    request(
+      "/api/v1/edge/device/telemetry",
+      "POST",
+      required(baseContext.deviceCode),
+      required(baseContext.deviceToken),
+      request
+    );
+    return baseContext.copy();
+  }
+
+  @NonNull
   public EdgeLocalContext fetchCurrentSession(@NonNull EdgeLocalContext baseContext) throws Exception {
     JSONObject data = request(
       "/api/v1/edge/sessions/current",
@@ -66,6 +112,37 @@ public final class EdgeApiClient {
       null
     );
     return mergeSession(baseContext, data);
+  }
+
+  @NonNull
+  public List<AvailableDriver> fetchAvailableDrivers(@NonNull EdgeLocalContext baseContext) throws Exception {
+    JSONObject data = request(
+      "/api/v1/edge/drivers/available",
+      "GET",
+      required(baseContext.deviceCode),
+      required(baseContext.deviceToken),
+      null
+    );
+    JSONArray items = data.optJSONArray("items");
+    List<AvailableDriver> drivers = new ArrayList<>();
+    if (items == null) {
+      return drivers;
+    }
+    for (int index = 0; index < items.length(); index++) {
+      JSONObject item = items.optJSONObject(index);
+      if (item == null) {
+        continue;
+      }
+      Long id = readLong(item, "id");
+      String driverCode = readString(item, "driverCode");
+      String name = readString(item, "name");
+      Long fleetId = readLong(item, "fleetId");
+      if (id == null || driverCode == null) {
+        continue;
+      }
+      drivers.add(new AvailableDriver(id, driverCode, name, fleetId));
+    }
+    return drivers;
   }
 
   @NonNull
@@ -222,6 +299,8 @@ public final class EdgeApiClient {
     context.vehiclePlateNumber = null;
     context.effectiveStage = null;
     context.configVersion = null;
+    context.runtimeConfigVersion = null;
+    context.runtimeConfigJson = null;
     clearSessionSnapshot(context);
   }
 
@@ -412,5 +491,75 @@ public final class EdgeApiClient {
   @Nullable
   private String firstNonBlank(@Nullable String first, @Nullable String second) {
     return first != null && !first.trim().isEmpty() ? first : second;
+  }
+
+  public static final class AvailableDriver {
+    @NonNull
+    private final Long id;
+    @NonNull
+    private final String driverCode;
+    @Nullable
+    private final String name;
+    @Nullable
+    private final Long fleetId;
+
+    public AvailableDriver(@NonNull Long id, @NonNull String driverCode, @Nullable String name, @Nullable Long fleetId) {
+      this.id = id;
+      this.driverCode = driverCode;
+      this.name = name;
+      this.fleetId = fleetId;
+    }
+
+    @NonNull
+    public Long getId() {
+      return id;
+    }
+
+    @NonNull
+    public String getDriverCode() {
+      return driverCode;
+    }
+
+    @Nullable
+    public String getName() {
+      return name;
+    }
+
+    @Nullable
+    public Long getFleetId() {
+      return fleetId;
+    }
+
+    @NonNull
+    public String displayLabel() {
+      if (name != null && !name.trim().isEmpty()) {
+        return driverCode + " / " + name;
+      }
+      return driverCode;
+    }
+  }
+
+  public static final class EdgeTelemetrySnapshot {
+    public final int uploadQueueSize;
+    @Nullable
+    public final String uploadLastFailureClass;
+    @Nullable
+    public final String uploadLastErrorMessage;
+    @Nullable
+    public final String uploadLastSuccessAt;
+    @Nullable
+    public final String uploadLastFailedAt;
+
+    public EdgeTelemetrySnapshot(int uploadQueueSize,
+                                 @Nullable String uploadLastFailureClass,
+                                 @Nullable String uploadLastErrorMessage,
+                                 @Nullable String uploadLastSuccessAt,
+                                 @Nullable String uploadLastFailedAt) {
+      this.uploadQueueSize = uploadQueueSize;
+      this.uploadLastFailureClass = uploadLastFailureClass;
+      this.uploadLastErrorMessage = uploadLastErrorMessage;
+      this.uploadLastSuccessAt = uploadLastSuccessAt;
+      this.uploadLastFailedAt = uploadLastFailedAt;
+    }
   }
 }

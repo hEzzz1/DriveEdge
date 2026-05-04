@@ -10,6 +10,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.driveedge.event.center.EdgeEvent;
+import com.driveedge.event.center.EdgeEventEvidence;
 import com.driveedge.event.center.UploadStatus;
 import com.driveedge.risk.engine.RiskLevel;
 import com.driveedge.risk.engine.RiskType;
@@ -28,7 +29,7 @@ import java.util.Set;
 
 final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventReporter.ReporterQueueStore {
   private static final String DB_NAME = "driveedge_outbox.db";
-  private static final int DB_VERSION = 2;
+  private static final int DB_VERSION = 3;
   private static final String READY_SELECTION =
     "(upload_status = ?)"
       + " OR (upload_status = ? AND (next_retry_at_ms IS NULL OR next_retry_at_ms <= ?))"
@@ -69,6 +70,10 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
         + "window_start_ms INTEGER NOT NULL,"
         + "window_end_ms INTEGER NOT NULL,"
         + "created_at_ms INTEGER NOT NULL,"
+        + "evidence_type TEXT,"
+        + "evidence_url TEXT,"
+        + "evidence_mime_type TEXT,"
+        + "evidence_captured_at_ms INTEGER,"
         + "retry_count INTEGER NOT NULL,"
         + "last_error_code INTEGER,"
         + "last_error_message TEXT,"
@@ -103,6 +108,12 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
       addColumnIfMissing(db, "ALTER TABLE " + TABLE_OUTBOX + " ADD COLUMN reported_enterprise_id TEXT");
       addColumnIfMissing(db, "ALTER TABLE " + TABLE_OUTBOX + " ADD COLUMN session_id INTEGER");
       addColumnIfMissing(db, "ALTER TABLE " + TABLE_OUTBOX + " ADD COLUMN config_version TEXT");
+    }
+    if (oldVersion < 3) {
+      addColumnIfMissing(db, "ALTER TABLE " + TABLE_OUTBOX + " ADD COLUMN evidence_type TEXT");
+      addColumnIfMissing(db, "ALTER TABLE " + TABLE_OUTBOX + " ADD COLUMN evidence_url TEXT");
+      addColumnIfMissing(db, "ALTER TABLE " + TABLE_OUTBOX + " ADD COLUMN evidence_mime_type TEXT");
+      addColumnIfMissing(db, "ALTER TABLE " + TABLE_OUTBOX + " ADD COLUMN evidence_captured_at_ms INTEGER");
     }
   }
 
@@ -337,6 +348,18 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
     values.put("window_start_ms", event.getWindowStartMs());
     values.put("window_end_ms", event.getWindowEndMs());
     values.put("created_at_ms", event.getCreatedAtMs());
+    if (event.getEvidence() == null) {
+      values.putNull("evidence_type");
+      values.putNull("evidence_url");
+      values.putNull("evidence_mime_type");
+      values.putNull("evidence_captured_at_ms");
+    } else {
+      EdgeEventEvidence evidence = event.getEvidence();
+      values.put("evidence_type", evidence.getType());
+      values.put("evidence_url", evidence.getUrl());
+      values.put("evidence_mime_type", evidence.getMimeType());
+      values.put("evidence_captured_at_ms", evidence.getCapturedAtMs());
+    }
     values.put("retry_count", row.getRetryCount());
     if (row.getLastErrorCode() == null) {
       values.putNull("last_error_code");
@@ -413,7 +436,8 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
         uploadStatus,
         cursor.getLong(column(cursor, "window_start_ms")),
         cursor.getLong(column(cursor, "window_end_ms")),
-        cursor.getLong(column(cursor, "created_at_ms"))
+        cursor.getLong(column(cursor, "created_at_ms")),
+        buildEvidence(cursor)
       );
 
     return new EdgeEventRow(
@@ -437,6 +461,20 @@ final class SQLiteOutboxStore extends SQLiteOpenHelper implements EdgeEventRepor
       array.put(reason.name());
     }
     return array.toString();
+  }
+
+  @Nullable
+  private EdgeEventEvidence buildEvidence(@NonNull Cursor cursor) {
+    String evidenceUrl = nullableString(cursor, "evidence_url");
+    if (evidenceUrl == null || evidenceUrl.trim().isEmpty()) {
+      return null;
+    }
+    return new EdgeEventEvidence(
+      nullableString(cursor, "evidence_type") == null ? "KEY_FRAME" : nullableString(cursor, "evidence_type"),
+      evidenceUrl,
+      nullableString(cursor, "evidence_mime_type") == null ? "image/jpeg" : nullableString(cursor, "evidence_mime_type"),
+      cursor.isNull(column(cursor, "evidence_captured_at_ms")) ? cursor.getLong(column(cursor, "created_at_ms")) : cursor.getLong(column(cursor, "evidence_captured_at_ms"))
+    );
   }
 
   @NonNull

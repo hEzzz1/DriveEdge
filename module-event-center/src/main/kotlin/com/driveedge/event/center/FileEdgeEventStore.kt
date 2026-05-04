@@ -36,6 +36,10 @@ class FileEdgeEventStore(
       event.windowStartMs.toString(),
       event.windowEndMs.toString(),
       event.createdAtMs.toString(),
+      event.evidence?.type.orEmpty(),
+      event.evidence?.url.orEmpty(),
+      event.evidence?.mimeType.orEmpty(),
+      event.evidence?.capturedAtMs?.toString().orEmpty(),
     ).joinToString("\t", transform = ::escape)
 
   private fun escape(value: String): String =

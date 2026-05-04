@@ -15,6 +15,13 @@ class EventCenter
   private val clock: Clock = Clock.systemUTC(),
 ) {
   fun process(candidate: RiskEventCandidate): EdgeEvent? {
+    return process(candidate, null)
+  }
+
+  fun process(
+    candidate: RiskEventCandidate,
+    evidence: EdgeEventEvidence?,
+  ): EdgeEvent? {
     if (!candidate.shouldTrigger) {
       return null
     }
@@ -46,6 +53,7 @@ class EventCenter
         windowStartMs = candidate.windowStartMs,
         windowEndMs = candidate.windowEndMs,
         createdAtMs = clock.millis(),
+        evidence = evidence,
       )
 
     eventStore.append(event)

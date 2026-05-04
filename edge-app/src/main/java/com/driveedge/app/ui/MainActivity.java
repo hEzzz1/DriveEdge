@@ -37,6 +37,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
 import android.provider.DocumentsContract;
+import android.util.Base64;
 import android.util.Log;
 import android.util.Range;
 import android.util.Size;
@@ -59,6 +60,10 @@ import com.driveedge.app.edge.EdgeApiClient;
 import com.driveedge.app.edge.EdgeContextStore;
 import com.driveedge.app.edge.EdgeFlowController;
 import com.driveedge.app.edge.EdgeLocalContext;
+import com.driveedge.app.edge.EdgeRuntimeConfig;
+import com.driveedge.app.evidence.EvidenceFrameArchiveWriter;
+import com.driveedge.app.evidence.EvidenceFrameBuffer;
+import com.driveedge.app.evidence.EvidenceMp4Writer;
 import com.driveedge.app.event.EdgeEventReporter;
 import com.driveedge.app.fatigue.LocalDistractionAnalyzer;
 import com.driveedge.app.fatigue.LocalFaceSignalAnalyzer;
@@ -82,7 +87,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -113,6 +117,14 @@ public final class MainActivity extends AppCompatActivity {
   private static final float FACE_CROP_MARGIN_RATIO = 0.18f;
   private static final int FATIGUE_MISSING_FACE_TOLERANCE_FRAMES = 2;
   private static final int RISK_MISSING_FACE_TOLERANCE_FRAMES = 2;
+  private static final String EVIDENCE_TYPE_KEY_FRAME = "KEY_FRAME";
+  private static final String EVIDENCE_TYPE_VIDEO_CLIP = "VIDEO_CLIP";
+  private static final String EVIDENCE_TYPE_FRAME_SEQUENCE = "FRAME_SEQUENCE";
+  private static final String EVIDENCE_MIME_IMAGE_JPEG = "image/jpeg";
+  private static final String EVIDENCE_MIME_VIDEO_MP4 = "video/mp4";
+  private static final String EVIDENCE_MIME_FRAME_SEQUENCE = "application/zip";
+  private static final long EVIDENCE_ARCHIVE_CLEANUP_INTERVAL_MS = 60 * 60 * 1000L;
+  private static final long EVIDENCE_ARCHIVE_LOCAL_RETENTION_MS = 2 * 24 * 60 * 60 * 1000L;
   @NonNull
   private static final TemporalEngineConfig REALTIME_TEMPORAL_CONFIG =
     new TemporalEngineConfig(
@@ -241,6 +253,7 @@ public final class MainActivity extends AppCompatActivity {
   private long lastDistractionWarningToastMs = 0L;
   private long quickFatigueCandidateStartedElapsedMs = 0L;
   private long lastQuickFatigueEventReportedElapsedMs = 0L;
+  private long lastEdgeEventScheduledElapsedMs = 0L;
   private int realtimeRiskMissingFaceFrames = 0;
   private boolean analyzersReady = false;
   private long lastQuickFatigueDetectedElapsedMs = 0L;
@@ -259,11 +272,15 @@ public final class MainActivity extends AppCompatActivity {
   @NonNull
   private volatile EdgeLocalContext edgeLocalContext = EdgeLocalContext.empty();
   @NonNull
+  private volatile EdgeRuntimeConfig edgeRuntimeConfig = EdgeRuntimeConfig.defaults();
+  @Nullable
+  private volatile String appliedRuntimeConfigVersion;
+  @NonNull
   private volatile String edgeEventStatusLine = "事件上报：待触发";
   @NonNull
-  private final TemporalEngine temporalEngine = new TemporalEngine(REALTIME_TEMPORAL_CONFIG);
+  private volatile TemporalEngine temporalEngine = new TemporalEngine(REALTIME_TEMPORAL_CONFIG);
   @NonNull
-  private final RiskEngine riskEngine = new RiskEngine(REALTIME_RISK_CONFIG);
+  private volatile RiskEngine riskEngine = new RiskEngine(REALTIME_RISK_CONFIG);
   @Nullable
   private volatile RiskEventCandidate latestRiskCandidate;
   @NonNull
@@ -272,6 +289,15 @@ public final class MainActivity extends AppCompatActivity {
   private final Object latestYuvFrameLock = new Object();
   @Nullable
   private YuvFrame latestYuvFrame;
+  @NonNull
+  private final EvidenceFrameBuffer evidenceFrameBuffer = new EvidenceFrameBuffer();
+  @NonNull
+  private final EvidenceFrameArchiveWriter evidenceFrameArchiveWriter = new EvidenceFrameArchiveWriter();
+  @NonNull
+  private final EvidenceMp4Writer evidenceMp4Writer = new EvidenceMp4Writer();
+  @Nullable
+  private PendingEdgeReport pendingEdgeReport;
+  private long lastEvidenceArchiveCleanupMs = 0L;
 
   private final ActivityResultLauncher<String> cameraPermissionLauncher =
     registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
@@ -339,6 +365,7 @@ public final class MainActivity extends AppCompatActivity {
     cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
     edgeContextStore = new EdgeContextStore(getApplicationContext());
     edgeLocalContext = edgeContextStore.load();
+    applyRuntimeConfig(edgeLocalContext);
     if (EdgeRoutes.routeIfNeeded(this, edgeFlowController, edgeLocalContext, MainActivity.class)) {
       return;
     }
@@ -408,6 +435,7 @@ public final class MainActivity extends AppCompatActivity {
     captureStarted = true;
     resetRealtimeRiskTracking();
     resetInferSession();
+    evidenceFrameBuffer.clear();
     statusView.setText(getString(R.string.status_connected));
     startButton.setEnabled(false);
     stopButton.setEnabled(true);
@@ -453,6 +481,7 @@ public final class MainActivity extends AppCompatActivity {
         EdgeLocalContext updated = edgeFlowController.syncContext(store.load());
         store.save(updated);
         edgeLocalContext = updated;
+        applyRuntimeConfig(updated);
         runOnUiThread(() -> {
           if (EdgeRoutes.routeIfNeeded(this, edgeFlowController, updated, MainActivity.class)) {
             return;
@@ -502,6 +531,7 @@ public final class MainActivity extends AppCompatActivity {
     EdgeContextStore store = edgeContextStore;
     if (store != null) {
       edgeLocalContext = store.load();
+      applyRuntimeConfig(edgeLocalContext);
     }
     if (EdgeRoutes.routeIfNeeded(this, edgeFlowController, edgeLocalContext, MainActivity.class)) {
       return;
@@ -520,6 +550,27 @@ public final class MainActivity extends AppCompatActivity {
       edgeEventStatusLine
     ));
     updateSessionControls();
+  }
+
+  private void applyRuntimeConfig(@NonNull EdgeLocalContext context) {
+    EdgeRuntimeConfig nextConfig = EdgeRuntimeConfig.fromContext(context);
+    String nextKey = String.valueOf(nextConfig.configVersion()) + ":" + (context.runtimeConfigJson == null ? 0 : context.runtimeConfigJson.hashCode());
+    if (nextKey.equals(appliedRuntimeConfigVersion)) {
+      edgeRuntimeConfig = nextConfig;
+      return;
+    }
+    try {
+      TemporalEngine nextTemporalEngine = new TemporalEngine(nextConfig.toTemporalEngineConfig());
+      RiskEngine nextRiskEngine = new RiskEngine(nextConfig.toRiskEngineConfig());
+      temporalEngine = nextTemporalEngine;
+      riskEngine = nextRiskEngine;
+      edgeRuntimeConfig = nextConfig;
+      appliedRuntimeConfigVersion = nextKey;
+      latestRiskCandidate = null;
+      realtimeRiskMissingFaceFrames = 0;
+    } catch (Exception error) {
+      Log.w(TAG, "Runtime edge config ignored", error);
+    }
   }
 
   private void updateSessionControls() {
@@ -1115,6 +1166,7 @@ public final class MainActivity extends AppCompatActivity {
         localFrame.jpeg,
         localFrame.jpeg,
         modelBitmap,
+        yuvFrame.capturedAtMs,
         "raw"
       );
     } catch (Exception error) {
@@ -1136,7 +1188,7 @@ public final class MainActivity extends AppCompatActivity {
     int height = image.getHeight();
     byte[] nv21 = yuv420888ToNv21(image, width, height);
     long timestampNs = image.getTimestamp() > 0L ? image.getTimestamp() : System.nanoTime();
-    return new YuvFrame(width, height, timestampNs, nv21);
+    return new YuvFrame(width, height, timestampNs, System.currentTimeMillis(), nv21);
   }
 
   @NonNull
@@ -1360,7 +1412,8 @@ public final class MainActivity extends AppCompatActivity {
         LocalFatigueAnalyzer.Result fatigue = getOrCreateLocalFatigueAnalyzer().analyze(faceSignals);
         updateQuickFatigueUiState(fatigue);
         RiskEventCandidate riskCandidate = updateRealtimeRisk(faceSignals, fatigue, uploadFrame.frame.timestampNs / 1_000_000L);
-        safeReportEdgeEvent(fatigue, riskCandidate);
+        rememberEvidenceFrame(uploadFrame);
+        safeReportEdgeEvent(uploadFrame, fatigue, riskCandidate);
         secondInferenceCounter.incrementAndGet();
         maybeDumpQualityReplay(uploadFrame, result);
         maybeSaveLocalRecognizedPhoto(uploadFrame, result);
@@ -1463,11 +1516,13 @@ public final class MainActivity extends AppCompatActivity {
     @NonNull LocalFatigueAnalyzer.Result fatigue,
     long frameTimestampMs
   ) {
+    TemporalEngine currentTemporalEngine = temporalEngine;
+    RiskEngine currentRiskEngine = riskEngine;
     if (faceSignals.faces <= 0) {
       realtimeRiskMissingFaceFrames++;
       if (realtimeRiskMissingFaceFrames > RISK_MISSING_FACE_TOLERANCE_FRAMES) {
-        temporalEngine.reset();
-        riskEngine.reset();
+        currentTemporalEngine.reset();
+        currentRiskEngine.reset();
         latestRiskCandidate = null;
         return null;
       }
@@ -1493,18 +1548,19 @@ public final class MainActivity extends AppCompatActivity {
       ));
     }
     detections.addAll(localDistractionAnalyzer.toTemporalDetections(faceSignals, frameTimestampMs));
-    FeatureWindow featureWindow = temporalEngine.update(detections);
+    FeatureWindow featureWindow = currentTemporalEngine.update(detections);
     if (featureWindow == null) {
       latestRiskCandidate = null;
       return null;
     }
 
-    RiskEventCandidate candidate = riskEngine.evaluate(featureWindow);
+    RiskEventCandidate candidate = currentRiskEngine.evaluate(featureWindow);
     latestRiskCandidate = candidate;
     return candidate;
   }
 
   private void maybeReportEdgeEvent(
+    @NonNull LocalUploadFrame uploadFrame,
     @NonNull LocalFatigueAnalyzer.Result fatigue,
     @Nullable RiskEventCandidate riskCandidate
   ) {
@@ -1512,27 +1568,341 @@ public final class MainActivity extends AppCompatActivity {
     if (reporter == null) {
       return;
     }
+    if (handlePendingEdgeReport(uploadFrame, reporter)) {
+      return;
+    }
+
+    EdgeRuntimeConfig config = edgeRuntimeConfig;
     if (riskCandidate != null && riskCandidate.getShouldTrigger()) {
-      reporter.reportRiskCandidate(riskCandidate);
-      lastQuickFatigueEventReportedElapsedMs = SystemClock.elapsedRealtime();
+      if (shouldDelayEvidenceReport(config) && shouldScheduleEdgeReport(config)) {
+        schedulePendingRiskReport(riskCandidate, uploadFrame.capturedAtMs, config);
+        lastQuickFatigueEventReportedElapsedMs = SystemClock.elapsedRealtime();
+      } else if (!shouldDelayEvidenceReport(config)) {
+        reporter.reportRiskCandidate(riskCandidate, buildEvidence(uploadFrame));
+        lastEdgeEventScheduledElapsedMs = SystemClock.elapsedRealtime();
+        lastQuickFatigueEventReportedElapsedMs = SystemClock.elapsedRealtime();
+      }
       return;
     }
     if (shouldReportQuickFatigueFallback(fatigue)) {
-      reporter.reportFatigueResult(fatigue, System.currentTimeMillis());
+      if (shouldDelayEvidenceReport(config) && shouldScheduleEdgeReport(config)) {
+        schedulePendingFatigueReport(fatigue, uploadFrame.capturedAtMs, config);
+      } else if (!shouldDelayEvidenceReport(config)) {
+        reporter.reportFatigueResult(fatigue, uploadFrame.capturedAtMs, buildEvidence(uploadFrame));
+        lastEdgeEventScheduledElapsedMs = SystemClock.elapsedRealtime();
+      }
       lastQuickFatigueEventReportedElapsedMs = SystemClock.elapsedRealtime();
     }
   }
 
+  private boolean handlePendingEdgeReport(
+    @NonNull LocalUploadFrame uploadFrame,
+    @NonNull EdgeEventReporter reporter
+  ) {
+    PendingEdgeReport pending = pendingEdgeReport;
+    if (pending == null) {
+      return false;
+    }
+    if (uploadFrame.capturedAtMs < pending.readyAtMs) {
+      return true;
+    }
+
+    pendingEdgeReport = null;
+    lastEdgeEventScheduledElapsedMs = SystemClock.elapsedRealtime();
+    EdgeEventReporter.EventEvidence evidence = buildEvidence(
+      uploadFrame,
+      pending.triggerCapturedAtMs,
+      pending.triggerCapturedAtMs - edgeRuntimeConfig.evidenceSequenceWindowMs(),
+      pending.readyAtMs
+    );
+    if (pending.riskCandidate != null) {
+      reporter.reportRiskCandidate(pending.riskCandidate, evidence);
+    } else if (pending.fatigueResult != null) {
+      reporter.reportFatigueResult(pending.fatigueResult, pending.triggerCapturedAtMs, evidence);
+    }
+    return true;
+  }
+
+  private boolean shouldDelayEvidenceReport(@NonNull EdgeRuntimeConfig config) {
+    return config.evidenceEnabled() && isBufferedEvidence(config) && config.evidencePostWindowMs() > 0L;
+  }
+
+  private boolean shouldScheduleEdgeReport(@NonNull EdgeRuntimeConfig config) {
+    if (pendingEdgeReport != null) {
+      return false;
+    }
+    long lastScheduledAt = lastEdgeEventScheduledElapsedMs;
+    if (lastScheduledAt <= 0L) {
+      return true;
+    }
+    return SystemClock.elapsedRealtime() - lastScheduledAt >= Math.max(1_000L, config.debounceWindowMs());
+  }
+
+  private void schedulePendingRiskReport(
+    @NonNull RiskEventCandidate riskCandidate,
+    long triggerCapturedAtMs,
+    @NonNull EdgeRuntimeConfig config
+  ) {
+    pendingEdgeReport = PendingEdgeReport.forRisk(
+      riskCandidate,
+      triggerCapturedAtMs,
+      triggerCapturedAtMs + config.evidencePostWindowMs()
+    );
+    lastEdgeEventScheduledElapsedMs = SystemClock.elapsedRealtime();
+    edgeEventStatusLine = "事件上报：等待后置证据";
+  }
+
+  private void schedulePendingFatigueReport(
+    @NonNull LocalFatigueAnalyzer.Result fatigue,
+    long triggerCapturedAtMs,
+    @NonNull EdgeRuntimeConfig config
+  ) {
+    pendingEdgeReport = PendingEdgeReport.forFatigue(
+      fatigue,
+      triggerCapturedAtMs,
+      triggerCapturedAtMs + config.evidencePostWindowMs()
+    );
+    lastEdgeEventScheduledElapsedMs = SystemClock.elapsedRealtime();
+    edgeEventStatusLine = "事件上报：等待后置证据";
+  }
+
   private void safeReportEdgeEvent(
+    @NonNull LocalUploadFrame uploadFrame,
     @NonNull LocalFatigueAnalyzer.Result fatigue,
     @Nullable RiskEventCandidate riskCandidate
   ) {
     try {
-      maybeReportEdgeEvent(fatigue, riskCandidate);
+      maybeReportEdgeEvent(uploadFrame, fatigue, riskCandidate);
     } catch (Exception error) {
       Log.e(TAG, "Edge event reporting failed", error);
       edgeEventStatusLine = "事件上报：异常 " + error.getClass().getSimpleName();
     }
+  }
+
+  @Nullable
+  private EdgeEventReporter.EventEvidence buildEvidence(@NonNull LocalUploadFrame uploadFrame) {
+    long eventCapturedAtMs = uploadFrame.capturedAtMs;
+    return buildEvidence(
+      uploadFrame,
+      eventCapturedAtMs,
+      eventCapturedAtMs - edgeRuntimeConfig.evidenceSequenceWindowMs(),
+      eventCapturedAtMs
+    );
+  }
+
+  @Nullable
+  private EdgeEventReporter.EventEvidence buildEvidence(
+    @NonNull LocalUploadFrame uploadFrame,
+    long eventCapturedAtMs,
+    long windowStartMs,
+    long windowEndMs
+  ) {
+    EdgeRuntimeConfig config = edgeRuntimeConfig;
+    if (!config.evidenceEnabled()) {
+      return null;
+    }
+    if (isVideoClipEvidence(config)) {
+      EdgeEventReporter.EventEvidence videoEvidence = buildVideoClipEvidence(uploadFrame, config, eventCapturedAtMs, windowStartMs, windowEndMs);
+      if (videoEvidence != null) {
+        return videoEvidence;
+      }
+    }
+    if (isBufferedEvidence(config)) {
+      EdgeEventReporter.EventEvidence sequenceEvidence = buildFrameSequenceEvidence(uploadFrame, config, eventCapturedAtMs, windowStartMs, windowEndMs);
+      if (sequenceEvidence != null) {
+        return sequenceEvidence;
+      }
+    }
+    return buildKeyFrameEvidence(uploadFrame, config, eventCapturedAtMs);
+  }
+
+  private void rememberEvidenceFrame(@NonNull LocalUploadFrame uploadFrame) {
+    EdgeRuntimeConfig config = edgeRuntimeConfig;
+    if (!config.evidenceEnabled() || !isBufferedEvidence(config)) {
+      return;
+    }
+    try {
+      int perFrameMaxBytes = resolveSequenceFrameMaxBytes(config);
+      EncodedJpeg jpeg = encodeEvidenceBitmapFrame(uploadFrame.modelBitmap, config.evidenceJpegQuality(), perFrameMaxBytes);
+      if (jpeg.jpeg.length == 0 || jpeg.jpeg.length > perFrameMaxBytes) {
+        return;
+      }
+      evidenceFrameBuffer.offer(
+        uploadFrame.capturedAtMs,
+        jpeg.jpeg,
+        jpeg.width,
+        jpeg.height,
+        evidenceBufferRetentionMs(config),
+        config.evidenceSequenceSampleIntervalMs(),
+        config.evidenceSequenceMaxFrames()
+      );
+    } catch (Exception error) {
+      Log.w(TAG, "Failed to remember evidence frame", error);
+    }
+  }
+
+  @Nullable
+  private EdgeEventReporter.EventEvidence buildVideoClipEvidence(
+    @NonNull LocalUploadFrame uploadFrame,
+    @NonNull EdgeRuntimeConfig config,
+    long eventCapturedAtMs,
+    long windowStartMs,
+    long windowEndMs
+  ) {
+    try {
+      cleanupOldEvidenceArchivesIfNeeded();
+      List<EvidenceFrameBuffer.EvidenceFrame> frames =
+        evidenceFrameBuffer.snapshotRange(windowStartMs, windowEndMs, evidenceBufferRetentionMs(config), config.evidenceSequenceMaxFrames());
+      if (frames.isEmpty()) {
+        return null;
+      }
+      File clip = evidenceMp4Writer.writeClip(
+        evidenceArchiveDir(),
+        "alert_video",
+        frames,
+        eventCapturedAtMs,
+        config.evidenceMaxBytes(),
+        resolveVideoFrameRate(config)
+      );
+      if (clip == null || !clip.isFile() || clip.length() <= 0L || clip.length() > config.evidenceMaxBytes()) {
+        return null;
+      }
+      return new EdgeEventReporter.EventEvidence(
+        EVIDENCE_TYPE_VIDEO_CLIP,
+        clip.toURI().toString(),
+        EVIDENCE_MIME_VIDEO_MP4,
+        eventCapturedAtMs
+      );
+    } catch (Exception error) {
+      Log.w(TAG, "Failed to build evidence video clip", error);
+      return null;
+    }
+  }
+
+  @Nullable
+  private EdgeEventReporter.EventEvidence buildFrameSequenceEvidence(
+    @NonNull LocalUploadFrame uploadFrame,
+    @NonNull EdgeRuntimeConfig config,
+    long eventCapturedAtMs,
+    long windowStartMs,
+    long windowEndMs
+  ) {
+    try {
+      cleanupOldEvidenceArchivesIfNeeded();
+      List<EvidenceFrameBuffer.EvidenceFrame> frames =
+        evidenceFrameBuffer.snapshotRange(windowStartMs, windowEndMs, evidenceBufferRetentionMs(config), config.evidenceSequenceMaxFrames());
+      if (frames.isEmpty()) {
+        return null;
+      }
+      File archive = evidenceFrameArchiveWriter.writeArchive(
+        evidenceArchiveDir(),
+        "alert_sequence",
+        frames,
+        eventCapturedAtMs,
+        config.evidenceMaxBytes()
+      );
+      if (archive == null || !archive.isFile() || archive.length() <= 0L || archive.length() > config.evidenceMaxBytes()) {
+        return null;
+      }
+      return new EdgeEventReporter.EventEvidence(
+        EVIDENCE_TYPE_FRAME_SEQUENCE,
+        archive.toURI().toString(),
+        EVIDENCE_MIME_FRAME_SEQUENCE,
+        eventCapturedAtMs
+      );
+    } catch (Exception error) {
+      Log.w(TAG, "Failed to build evidence sequence archive", error);
+      return null;
+    }
+  }
+
+  @Nullable
+  private EdgeEventReporter.EventEvidence buildKeyFrameEvidence(
+    @NonNull LocalUploadFrame uploadFrame,
+    @NonNull EdgeRuntimeConfig config,
+    long eventCapturedAtMs
+  ) {
+    try {
+      EncodedJpeg jpeg = encodeEvidenceBitmapFrame(uploadFrame.modelBitmap, config.evidenceJpegQuality(), config.evidenceMaxBytes());
+      if (jpeg.jpeg.length == 0 || jpeg.jpeg.length > config.evidenceMaxBytes()) {
+        return null;
+      }
+      String dataUrl =
+        "data:" + EVIDENCE_MIME_IMAGE_JPEG + ";base64," + Base64.encodeToString(jpeg.jpeg, Base64.NO_WRAP);
+      String evidenceType = isBufferedEvidence(config) || config.evidenceType().trim().isEmpty()
+        ? EVIDENCE_TYPE_KEY_FRAME
+        : config.evidenceType().trim();
+      return new EdgeEventReporter.EventEvidence(
+        evidenceType,
+        dataUrl,
+        EVIDENCE_MIME_IMAGE_JPEG,
+        eventCapturedAtMs
+      );
+    } catch (Exception error) {
+      Log.w(TAG, "Failed to build evidence frame", error);
+      return null;
+    }
+  }
+
+  private boolean isFrameSequenceEvidence(@NonNull EdgeRuntimeConfig config) {
+    return EVIDENCE_TYPE_FRAME_SEQUENCE.equalsIgnoreCase(config.evidenceType())
+      || EVIDENCE_MIME_FRAME_SEQUENCE.equalsIgnoreCase(config.evidenceMimeType());
+  }
+
+  private boolean isVideoClipEvidence(@NonNull EdgeRuntimeConfig config) {
+    return EVIDENCE_TYPE_VIDEO_CLIP.equalsIgnoreCase(config.evidenceType())
+      || EVIDENCE_MIME_VIDEO_MP4.equalsIgnoreCase(config.evidenceMimeType());
+  }
+
+  private boolean isBufferedEvidence(@NonNull EdgeRuntimeConfig config) {
+    return isVideoClipEvidence(config) || isFrameSequenceEvidence(config);
+  }
+
+  private long evidenceBufferRetentionMs(@NonNull EdgeRuntimeConfig config) {
+    return config.evidenceSequenceWindowMs()
+      + config.evidencePostWindowMs()
+      + config.evidenceSequenceSampleIntervalMs();
+  }
+
+  private int resolveSequenceFrameMaxBytes(@NonNull EdgeRuntimeConfig config) {
+    int maxFrames = Math.max(1, config.evidenceSequenceMaxFrames());
+    int perFrameBudget = Math.max(16 * 1024, config.evidenceMaxBytes() / maxFrames);
+    return Math.min(384 * 1024, perFrameBudget);
+  }
+
+  private int resolveVideoFrameRate(@NonNull EdgeRuntimeConfig config) {
+    long intervalMs = Math.max(1L, config.evidenceSequenceSampleIntervalMs());
+    return Math.max(1, Math.min(15, Math.round(1000f / intervalMs)));
+  }
+
+  @NonNull
+  private EncodedJpeg encodeEvidenceBitmapFrame(@NonNull Bitmap source, int initialQuality, int maxBytes) {
+    int targetWidth = Math.min(640, source.getWidth());
+    int quality = initialQuality;
+    EncodedJpeg encoded = new EncodedJpeg(EMPTY_FRAME_BYTES, 0, 0);
+    while (targetWidth >= 240) {
+      int targetHeight = Math.max(1, Math.round(source.getHeight() * (targetWidth / (float) source.getWidth())));
+      Bitmap evidenceBitmap = targetWidth == source.getWidth()
+        ? source
+        : Bitmap.createScaledBitmap(source, targetWidth, targetHeight, true);
+      try {
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream(Math.min(maxBytes, targetWidth * targetHeight));
+        if (!evidenceBitmap.compress(Bitmap.CompressFormat.JPEG, quality, outputStream)) {
+          return new EncodedJpeg(EMPTY_FRAME_BYTES, 0, 0);
+        }
+        encoded = new EncodedJpeg(outputStream.toByteArray(), evidenceBitmap.getWidth(), evidenceBitmap.getHeight());
+        if (encoded.jpeg.length <= maxBytes || quality <= 45) {
+          break;
+        }
+      } finally {
+        if (evidenceBitmap != source) {
+          evidenceBitmap.recycle();
+        }
+      }
+      targetWidth = Math.round(targetWidth * 0.75f);
+      quality = Math.max(45, quality - 8);
+    }
+    return encoded;
   }
 
   private void maybeShowFatigueWarningToast(
@@ -1856,12 +2226,44 @@ public final class MainActivity extends AppCompatActivity {
   }
 
   @NonNull
+  private File evidenceArchiveDir() {
+    File externalDir = getExternalFilesDir(null);
+    File root = externalDir == null ? getFilesDir() : externalDir;
+    File dir = new File(root, "alert_evidence");
+    if (!dir.exists()) {
+      dir.mkdirs();
+    }
+    return dir;
+  }
+
+  @NonNull
   private File ensureSubDir(@NonNull File root, @NonNull String name) {
     File dir = new File(root, name);
     if (!dir.exists()) {
       dir.mkdirs();
     }
     return dir;
+  }
+
+  private void cleanupOldEvidenceArchivesIfNeeded() {
+    long now = SystemClock.elapsedRealtime();
+    if (now - lastEvidenceArchiveCleanupMs < EVIDENCE_ARCHIVE_CLEANUP_INTERVAL_MS) {
+      return;
+    }
+    lastEvidenceArchiveCleanupMs = now;
+    File dir = evidenceArchiveDir();
+    File[] files = dir.listFiles();
+    if (files == null || files.length == 0) {
+      return;
+    }
+    long cutoff = System.currentTimeMillis() - EVIDENCE_ARCHIVE_LOCAL_RETENTION_MS;
+    for (File file : files) {
+      if (file != null && file.isFile() && file.lastModified() > 0L && file.lastModified() < cutoff) {
+        if (!file.delete()) {
+          file.deleteOnExit();
+        }
+      }
+    }
   }
 
   private void resetInferSession() {
@@ -1881,6 +2283,8 @@ public final class MainActivity extends AppCompatActivity {
     lastFatigueWarningToastMs = 0L;
     quickFatigueCandidateStartedElapsedMs = 0L;
     lastQuickFatigueEventReportedElapsedMs = 0L;
+    lastEdgeEventScheduledElapsedMs = 0L;
+    pendingEdgeReport = null;
     lastQuickFatigueDetectedElapsedMs = 0L;
     lastQuickFatigueEventSummary = "fatigue_normal";
   }
@@ -2275,6 +2679,8 @@ public final class MainActivity extends AppCompatActivity {
     synchronized (latestYuvFrameLock) {
       latestYuvFrame = null;
     }
+    evidenceFrameBuffer.clear();
+    pendingEdgeReport = null;
 
     releaseMediaRecorder();
     isRecording = false;
@@ -2289,6 +2695,7 @@ public final class MainActivity extends AppCompatActivity {
     final byte[] enhancedJpeg;
     @NonNull
     final Bitmap modelBitmap;
+    final long capturedAtMs;
     @NonNull
     final String qualityTag;
 
@@ -2297,13 +2704,54 @@ public final class MainActivity extends AppCompatActivity {
       @NonNull byte[] rawJpeg,
       @NonNull byte[] enhancedJpeg,
       @NonNull Bitmap modelBitmap,
+      long capturedAtMs,
       @NonNull String qualityTag
     ) {
       this.frame = frame;
       this.rawJpeg = rawJpeg;
       this.enhancedJpeg = enhancedJpeg;
       this.modelBitmap = modelBitmap;
+      this.capturedAtMs = capturedAtMs;
       this.qualityTag = qualityTag;
+    }
+  }
+
+  private static final class PendingEdgeReport {
+    @Nullable
+    final RiskEventCandidate riskCandidate;
+    @Nullable
+    final LocalFatigueAnalyzer.Result fatigueResult;
+    final long triggerCapturedAtMs;
+    final long readyAtMs;
+
+    private PendingEdgeReport(
+      @Nullable RiskEventCandidate riskCandidate,
+      @Nullable LocalFatigueAnalyzer.Result fatigueResult,
+      long triggerCapturedAtMs,
+      long readyAtMs
+    ) {
+      this.riskCandidate = riskCandidate;
+      this.fatigueResult = fatigueResult;
+      this.triggerCapturedAtMs = triggerCapturedAtMs;
+      this.readyAtMs = Math.max(triggerCapturedAtMs, readyAtMs);
+    }
+
+    @NonNull
+    static PendingEdgeReport forRisk(
+      @NonNull RiskEventCandidate riskCandidate,
+      long triggerCapturedAtMs,
+      long readyAtMs
+    ) {
+      return new PendingEdgeReport(riskCandidate, null, triggerCapturedAtMs, readyAtMs);
+    }
+
+    @NonNull
+    static PendingEdgeReport forFatigue(
+      @NonNull LocalFatigueAnalyzer.Result fatigueResult,
+      long triggerCapturedAtMs,
+      long readyAtMs
+    ) {
+      return new PendingEdgeReport(null, fatigueResult, triggerCapturedAtMs, readyAtMs);
     }
   }
 
@@ -2311,13 +2759,15 @@ public final class MainActivity extends AppCompatActivity {
     final int width;
     final int height;
     final long timestampNs;
+    final long capturedAtMs;
     @NonNull
     final byte[] nv21;
 
-    YuvFrame(int width, int height, long timestampNs, @NonNull byte[] nv21) {
+    YuvFrame(int width, int height, long timestampNs, long capturedAtMs, @NonNull byte[] nv21) {
       this.width = width;
       this.height = height;
       this.timestampNs = timestampNs;
+      this.capturedAtMs = capturedAtMs;
       this.nv21 = nv21;
     }
   }

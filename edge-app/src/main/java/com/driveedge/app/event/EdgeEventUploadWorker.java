@@ -16,7 +16,9 @@ import androidx.work.WorkManager;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
 
+import com.driveedge.app.edge.EdgeApiClient;
 import com.driveedge.app.edge.EdgeContextStore;
+import com.driveedge.app.edge.EdgeLocalContext;
 import com.driveedge.storage.EdgeEventRow;
 import com.driveedge.storage.StorageCenter;
 import com.driveedge.storage.UploadAttemptResult;
@@ -26,6 +28,7 @@ import com.driveedge.uploader.EventUploader;
 import com.driveedge.uploader.UploadReceipt;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -55,7 +58,7 @@ public final class EdgeEventUploadWorker extends Worker {
       if (eventUploader == null) {
         return Result.success();
       }
-      processUploads(store, storageCenter, eventUploader, appContext);
+      processUploads(store, storageCenter, eventUploader, appContext, contextStore);
       return Result.success();
     } catch (Exception error) {
       return Result.retry();
@@ -109,7 +112,8 @@ public final class EdgeEventUploadWorker extends Worker {
     @NonNull EdgeEventReporter.ReporterQueueStore store,
     @NonNull StorageCenter storageCenter,
     @NonNull EventUploader eventUploader,
-    @NonNull Context context
+    @NonNull Context context,
+    @NonNull EdgeContextStore contextStore
   ) {
     while (true) {
       long nowMs = System.currentTimeMillis();
@@ -138,6 +142,7 @@ public final class EdgeEventUploadWorker extends Worker {
           ),
           System.currentTimeMillis()
         );
+        publishTelemetry(store, contextStore, row);
         if (row != null && row.getUploadStatus() == com.driveedge.event.center.UploadStatus.RETRY_WAIT) {
           Long nextRetryAtMs = row.getNextRetryAtMs();
           long currentMs = System.currentTimeMillis();
@@ -146,6 +151,51 @@ public final class EdgeEventUploadWorker extends Worker {
           }
         }
       }
+    }
+  }
+
+  private static void publishTelemetry(
+    @NonNull EdgeEventReporter.ReporterQueueStore store,
+    @NonNull EdgeContextStore contextStore,
+    EdgeEventRow row
+  ) {
+    EdgeLocalContext context = contextStore.load();
+    if (isBlank(context.deviceCode) || isBlank(context.deviceToken)) {
+      return;
+    }
+    long nowMs = System.currentTimeMillis();
+    String now = Instant.ofEpochMilli(nowMs).toString();
+    String successAt = null;
+    String failedAt = null;
+    String failureClass = null;
+    String errorMessage = null;
+    if (row != null) {
+      switch (row.getUploadStatus()) {
+        case SUCCESS:
+          successAt = now;
+          break;
+        case RETRY_WAIT:
+        case FAILED_FINAL:
+          failedAt = now;
+          failureClass = row.getFailureClass().name();
+          errorMessage = row.getLastErrorMessage();
+          break;
+        default:
+          break;
+      }
+    }
+    try {
+      new EdgeApiClient().submitTelemetry(
+        context,
+        new EdgeApiClient.EdgeTelemetrySnapshot(
+          store.countQueuedEvents(nowMs),
+          failureClass,
+          errorMessage,
+          successAt,
+          failedAt
+        )
+      );
+    } catch (Exception ignored) {
     }
   }
 
@@ -209,5 +259,9 @@ public final class EdgeEventUploadWorker extends Worker {
       return second;
     }
     return fallback;
+  }
+
+  private static boolean isBlank(String value) {
+    return value == null || value.trim().isEmpty();
   }
 }

@@ -85,7 +85,6 @@ dependencies {
   implementation("androidx.security:security-crypto:1.1.0-alpha06")
   implementation("androidx.work:work-runtime:2.9.1")
   implementation("com.journeyapps:zxing-android-embedded:4.3.0")
-  implementation("io.github.crow-misia.libyuv:libyuv-android:0.43.2")
   implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
   implementation("com.google.mediapipe:tasks-vision:latest.release")
   implementation(project(":module-event-center"))

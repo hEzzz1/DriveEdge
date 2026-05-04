@@ -23,6 +23,8 @@ public final class EdgeLocalContext {
   @Nullable public String sessionNo;
   @Nullable public String sessionStage;
   @Nullable public String configVersion;
+  @Nullable public String runtimeConfigVersion;
+  @Nullable public String runtimeConfigJson;
   @Nullable public String signedInAt;
   @Nullable public String lastSyncAt;
   @Nullable public String sessionClosedReason;
@@ -54,6 +56,8 @@ public final class EdgeLocalContext {
     copy.sessionNo = sessionNo;
     copy.sessionStage = sessionStage;
     copy.configVersion = configVersion;
+    copy.runtimeConfigVersion = runtimeConfigVersion;
+    copy.runtimeConfigJson = runtimeConfigJson;
     copy.signedInAt = signedInAt;
     copy.lastSyncAt = lastSyncAt;
     copy.sessionClosedReason = sessionClosedReason;
@@ -111,6 +115,8 @@ public final class EdgeLocalContext {
     vehiclePlateNumber = null;
     effectiveStage = null;
     configVersion = null;
+    runtimeConfigVersion = null;
+    runtimeConfigJson = null;
     lastSyncAt = null;
     clearSession();
   }

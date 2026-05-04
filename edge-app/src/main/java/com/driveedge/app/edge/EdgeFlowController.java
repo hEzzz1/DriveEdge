@@ -43,12 +43,21 @@ public final class EdgeFlowController {
       return toClaimEnterpriseContext(cachedContext.copy());
     }
     try {
-      return edgeApiClient.fetchContext(cachedContext);
+      return syncRuntimeConfig(edgeApiClient.fetchContext(cachedContext));
     } catch (EdgeApiException error) {
       if (error.code == EDGE_UNAUTHORIZED_CODE || error.code == EDGE_NOT_FOUND_CODE) {
         return toClaimEnterpriseContext(cachedContext.copy());
       }
       throw error;
+    }
+  }
+
+  @NonNull
+  private EdgeLocalContext syncRuntimeConfig(@NonNull EdgeLocalContext context) {
+    try {
+      return edgeApiClient.fetchEdgeConfig(context);
+    } catch (Exception ignored) {
+      return context;
     }
   }
 

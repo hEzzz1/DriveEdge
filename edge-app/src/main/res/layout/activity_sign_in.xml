@@ -36,6 +36,29 @@
       android:text="@string/edge_context_empty"
       android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
 
+    <TextView
+      android:id="@+id/availableDriversLabelView"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginBottom="6dp"
+      android:text="@string/edge_available_drivers_title"
+      android:textAppearance="@style/TextAppearance.Material3.LabelLarge" />
+
+    <Spinner
+      android:id="@+id/availableDriverSpinner"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginBottom="8dp"
+      android:spinnerMode="dropdown" />
+
+    <TextView
+      android:id="@+id/availableDriversHintView"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginBottom="12dp"
+      android:text="@string/edge_available_drivers_loading"
+      android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
     <EditText
       android:id="@+id/driverCodeInput"
       android:layout_width="match_parent"

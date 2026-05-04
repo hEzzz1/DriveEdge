@@ -12,7 +12,16 @@ enum class UploadStatus {
   FAILED_FINAL,
 }
 
-data class EdgeEvent(
+data class EdgeEventEvidence(
+  val type: String,
+  val url: String,
+  val mimeType: String,
+  val capturedAtMs: Long,
+)
+
+data class EdgeEvent
+  @JvmOverloads
+  constructor(
   val eventId: String,
   val deviceCode: String,
   val reportedEnterpriseId: String?,
@@ -32,4 +41,5 @@ data class EdgeEvent(
   val windowStartMs: Long,
   val windowEndMs: Long,
   val createdAtMs: Long,
+  val evidence: EdgeEventEvidence? = null,
 )

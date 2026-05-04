@@ -10,11 +10,14 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.driveedge.app.BuildConfig;
+import com.driveedge.app.edge.EdgeApiClient;
 import com.driveedge.app.edge.EdgeContextStore;
 import com.driveedge.app.edge.EdgeLocalContext;
+import com.driveedge.app.edge.EdgeRuntimeConfig;
 import com.driveedge.app.fatigue.LocalFatigueAnalyzer;
 import com.driveedge.event.center.EventDebouncer;
 import com.driveedge.event.center.EdgeEvent;
+import com.driveedge.event.center.EdgeEventEvidence;
 import com.driveedge.event.center.EventIdGenerator;
 import com.driveedge.event.center.EdgeEventStore;
 import com.driveedge.event.center.EventCenter;
@@ -43,6 +46,7 @@ import org.json.JSONObject;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -61,6 +65,7 @@ public final class EdgeEventReporter implements AutoCloseable {
   private static final int MAX_PENDING_SCAN = 512;
   private static final int UPLOAD_BATCH_SIZE = 8;
   private static final int MAX_UPLOAD_BATCH_SIZE = 24;
+  private static final long TELEMETRY_MIN_INTERVAL_MS = 5_000L;
 
   @NonNull
   private final Context appContext;
@@ -72,6 +77,9 @@ public final class EdgeEventReporter implements AutoCloseable {
   private final StorageCenter storageCenter;
   @NonNull
   private final EventDebouncer eventDebouncer;
+  @Nullable
+  private EventDebouncer runtimeEventDebouncer;
+  private long runtimeDebounceWindowMs = -1L;
   @Nullable
   private final EventCenter injectedEventCenter;
   @Nullable
@@ -97,6 +105,15 @@ public final class EdgeEventReporter implements AutoCloseable {
   private final boolean directUploadMode;
   @NonNull
   private volatile String lastStatusLine = "事件上报：待触发";
+  @Nullable
+  private volatile String telemetryLastSuccessAt;
+  @Nullable
+  private volatile String telemetryLastFailedAt;
+  @Nullable
+  private volatile String telemetryLastFailureClass;
+  @Nullable
+  private volatile String telemetryLastErrorMessage;
+  private volatile long telemetryLastSubmittedAtMs = 0L;
 
   public EdgeEventReporter(@NonNull Context context, @NonNull StatusListener statusListener) {
     this.statusListener = statusListener;
@@ -198,13 +215,21 @@ public final class EdgeEventReporter implements AutoCloseable {
   }
 
   public void reportFatigueResult(@NonNull LocalFatigueAnalyzer.Result fatigue, long eventTimeMs) {
+    reportFatigueResult(fatigue, eventTimeMs, null);
+  }
+
+  public void reportFatigueResult(@NonNull LocalFatigueAnalyzer.Result fatigue, long eventTimeMs, @Nullable EventEvidence evidence) {
     if (closed || !fatigue.drowsy) {
       return;
     }
-    reportRiskCandidate(toFatigueCandidate(fatigue, eventTimeMs));
+    reportRiskCandidate(toFatigueCandidate(fatigue, eventTimeMs), evidence);
   }
 
   public void reportRiskCandidate(@NonNull RiskEventCandidate candidate) {
+    reportRiskCandidate(candidate, null);
+  }
+
+  public void reportRiskCandidate(@NonNull RiskEventCandidate candidate, @Nullable EventEvidence evidence) {
     if (closed || !candidate.getShouldTrigger()) {
       return;
     }
@@ -214,7 +239,7 @@ public final class EdgeEventReporter implements AutoCloseable {
       updateStatus("事件上报：设备上下文未就绪");
       return;
     }
-    EdgeEvent event = eventCenter.process(candidate);
+    EdgeEvent event = eventCenter.process(candidate, evidence == null ? null : evidence.toEdgeEventEvidence());
     if (event == null) {
       updateQueuedStatus("事件上报：窗口内去抖");
       return;
@@ -308,6 +333,7 @@ public final class EdgeEventReporter implements AutoCloseable {
             System.currentTimeMillis()
           );
           updateStatusForRow(row, receipt);
+          publishTelemetry(row, false);
         }
       }
     } finally {
@@ -324,6 +350,7 @@ public final class EdgeEventReporter implements AutoCloseable {
       updateStatus("事件上报：状态回写失败 eventId=" + receipt.getEventId());
       return;
     }
+    updateTelemetryState(row);
     String httpStatus = receipt.getHttpStatus() == null ? "-" : String.valueOf(receipt.getHttpStatus());
     String traceId = firstNonBlank(receipt.getTraceId(), "-", "-");
     switch (row.getUploadStatus()) {
@@ -378,6 +405,56 @@ public final class EdgeEventReporter implements AutoCloseable {
       default:
         updateStatus("事件上报：状态=" + row.getUploadStatus().name());
         break;
+    }
+  }
+
+  private void updateTelemetryState(@NonNull EdgeEventRow row) {
+    String now = Instant.now().toString();
+    switch (row.getUploadStatus()) {
+      case SUCCESS:
+        telemetryLastSuccessAt = now;
+        break;
+      case RETRY_WAIT:
+      case FAILED_FINAL:
+        telemetryLastFailedAt = now;
+        telemetryLastFailureClass = row.getFailureClass().name();
+        telemetryLastErrorMessage = row.getLastErrorMessage();
+        break;
+      default:
+        break;
+    }
+  }
+
+  private void publishTelemetry(@Nullable EdgeEventRow row, boolean force) {
+    EdgeContextStore contextStore = edgeContextStore;
+    if (closed || contextStore == null) {
+      return;
+    }
+    long nowMs = System.currentTimeMillis();
+    if (!force && nowMs - telemetryLastSubmittedAtMs < TELEMETRY_MIN_INTERVAL_MS) {
+      return;
+    }
+    EdgeLocalContext context = contextStore.load();
+    if (isBlank(context.deviceCode) || isBlank(context.deviceToken)) {
+      return;
+    }
+    telemetryLastSubmittedAtMs = nowMs;
+    if (row != null && (row.getUploadStatus() == UploadStatus.RETRY_WAIT || row.getUploadStatus() == UploadStatus.FAILED_FINAL)) {
+      telemetryLastFailureClass = row.getFailureClass().name();
+      telemetryLastErrorMessage = row.getLastErrorMessage();
+    }
+    try {
+      new EdgeApiClient().submitTelemetry(
+        context,
+        new EdgeApiClient.EdgeTelemetrySnapshot(
+          queueStore.countQueuedEvents(nowMs),
+          telemetryLastFailureClass,
+          telemetryLastErrorMessage,
+          telemetryLastSuccessAt,
+          telemetryLastFailedAt
+        )
+      );
+    } catch (Exception ignored) {
     }
   }
 
@@ -543,6 +620,28 @@ public final class EdgeEventReporter implements AutoCloseable {
 
   public interface StatusListener {
     void onStatusChanged(@NonNull String statusLine);
+  }
+
+  public static final class EventEvidence {
+    @NonNull
+    public final String type;
+    @NonNull
+    public final String url;
+    @NonNull
+    public final String mimeType;
+    public final long capturedAtMs;
+
+    public EventEvidence(@NonNull String type, @NonNull String url, @NonNull String mimeType, long capturedAtMs) {
+      this.type = type;
+      this.url = url;
+      this.mimeType = mimeType;
+      this.capturedAtMs = capturedAtMs;
+    }
+
+    @NonNull
+    private EdgeEventEvidence toEdgeEventEvidence() {
+      return new EdgeEventEvidence(type, url, mimeType, capturedAtMs);
+    }
   }
 
   interface ReporterQueueStore extends EdgeEventDao, DeviceConfigDao {
@@ -842,6 +941,13 @@ public final class EdgeEventReporter implements AutoCloseable {
         object.put("windowStartMs", event.getWindowStartMs());
         object.put("windowEndMs", event.getWindowEndMs());
         object.put("createdAtMs", event.getCreatedAtMs());
+        EdgeEventEvidence evidence = event.getEvidence();
+        if (evidence != null) {
+          object.put("evidenceType", evidence.getType());
+          object.put("evidenceUrl", evidence.getUrl());
+          object.put("evidenceMimeType", evidence.getMimeType());
+          object.put("evidenceCapturedAtMs", evidence.getCapturedAtMs());
+        }
         object.put("retryCount", row.getRetryCount());
         object.put("lastErrorCode", row.getLastErrorCode() == null ? JSONObject.NULL : row.getLastErrorCode());
         object.put("lastErrorMessage", row.getLastErrorMessage() == null ? JSONObject.NULL : row.getLastErrorMessage());
@@ -880,6 +986,16 @@ public final class EdgeEventReporter implements AutoCloseable {
         }
       }
       UploadStatus uploadStatus = UploadStatus.valueOf(object.optString("uploadStatus", UploadStatus.PENDING.name()));
+      EdgeEventEvidence evidence = null;
+      String evidenceUrl = object.optString("evidenceUrl", null);
+      if (!isBlankStatic(evidenceUrl) && !"null".equalsIgnoreCase(evidenceUrl)) {
+        evidence = new EdgeEventEvidence(
+          object.optString("evidenceType", "KEY_FRAME"),
+          evidenceUrl,
+          object.optString("evidenceMimeType", "image/jpeg"),
+          object.optLong("evidenceCapturedAtMs", object.optLong("createdAtMs", 0L))
+        );
+      }
       UploadFailureClass failureClass = UploadFailureClass.NONE;
       String failureClassName = object.optString("failureClass", UploadFailureClass.NONE.name());
       try {
@@ -905,7 +1021,8 @@ public final class EdgeEventReporter implements AutoCloseable {
         uploadStatus,
         object.optLong("windowStartMs", 0L),
         object.optLong("windowEndMs", 0L),
-        object.optLong("createdAtMs", 0L)
+        object.optLong("createdAtMs", 0L),
+        evidence
       );
       Long nextRetryAtMs = object.isNull("nextRetryAtMs") ? null : object.optLong("nextRetryAtMs");
       return new EdgeEventRow(
@@ -1004,16 +1121,19 @@ public final class EdgeEventReporter implements AutoCloseable {
     if (isBlankStatic(deviceCode) || isBlankStatic(deviceToken)) {
       return null;
     }
+    EdgeRuntimeConfig runtimeConfig = localContext == null ? EdgeRuntimeConfig.defaults() : EdgeRuntimeConfig.fromContext(localContext);
     return new EventUploader(
       new UploaderConfig(
         BuildConfig.EDGE_SERVER_BASE_URL,
         deviceCode,
         deviceToken,
         "/api/v1/events",
+        "/api/v1/events/evidence",
         "Idempotency-Key",
         "X-Event-Id",
         Duration.ofSeconds(5),
-        Duration.ofSeconds(8)
+        Duration.ofSeconds(8),
+        runtimeConfig.evidenceMaxBytes()
       )
     );
   }
@@ -1028,6 +1148,7 @@ public final class EdgeEventReporter implements AutoCloseable {
     if (!context.hasVehicleBinding() || isBlank(context.deviceCode)) {
       return null;
     }
+    EdgeRuntimeConfig runtimeConfig = EdgeRuntimeConfig.fromContext(context);
     EdgeEventStore eventStore = event -> storageCenter.onEdgeEvent(event, System.currentTimeMillis());
     return new EventCenter(
       new EventCenterConfig(
@@ -1039,12 +1160,24 @@ public final class EdgeEventReporter implements AutoCloseable {
         context.sessionId,
         context.configVersion,
         BuildConfig.EDGE_ALGORITHM_VERSION,
-        8_000L
+        runtimeConfig.debounceWindowMs()
       ),
       eventStore,
       new EventIdGenerator(String.valueOf(context.vehicleId)),
-      eventDebouncer
+      resolveRuntimeDebouncer(runtimeConfig.debounceWindowMs())
     );
+  }
+
+  @NonNull
+  private synchronized EventDebouncer resolveRuntimeDebouncer(long debounceWindowMs) {
+    if (debounceWindowMs <= 0L) {
+      return eventDebouncer;
+    }
+    if (runtimeEventDebouncer == null || runtimeDebounceWindowMs != debounceWindowMs) {
+      runtimeEventDebouncer = new EventDebouncer(debounceWindowMs);
+      runtimeDebounceWindowMs = debounceWindowMs;
+    }
+    return runtimeEventDebouncer;
   }
 
   @Nullable

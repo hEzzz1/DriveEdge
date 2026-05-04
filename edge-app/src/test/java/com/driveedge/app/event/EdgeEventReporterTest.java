@@ -269,6 +269,25 @@ public final class EdgeEventReporterTest {
       return new TransportResponse(200, "{\"code\":0,\"message\":\"ok\",\"traceId\":\"trace-" + eventId + "\"}");
     }
 
+    @Override
+    public TransportResponse postEvidence(
+      String endpointUrl,
+      String deviceCode,
+      String deviceToken,
+      String eventId,
+      String evidenceType,
+      String evidenceMimeType,
+      long evidenceCapturedAtMs,
+      String filename,
+      byte[] bytes,
+      java.time.Duration timeout
+    ) {
+      return new TransportResponse(
+        200,
+        "{\"code\":0,\"message\":\"ok\",\"data\":{\"evidenceUrl\":\"alert-evidence:events/" + eventId + ".bin\"}}"
+      );
+    }
+
     void enqueueTimeout(String message) {
       scriptedOutcomes.add(new TransportException(message, UploadFailureCategory.TIMEOUT, null));
     }

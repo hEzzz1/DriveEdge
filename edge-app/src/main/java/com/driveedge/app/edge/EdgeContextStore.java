@@ -85,6 +85,8 @@ public final class EdgeContextStore {
       json.put("sessionNo", context.sessionNo);
       json.put("sessionStage", context.sessionStage);
       json.put("configVersion", context.configVersion);
+      json.put("runtimeConfigVersion", context.runtimeConfigVersion);
+      json.put("runtimeConfigJson", context.runtimeConfigJson);
       json.put("signedInAt", context.signedInAt);
       json.put("lastSyncAt", context.lastSyncAt);
       json.put("sessionClosedReason", context.sessionClosedReason);
@@ -115,6 +117,8 @@ public final class EdgeContextStore {
     context.sessionNo = readString(json, "sessionNo");
     context.sessionStage = readString(json, "sessionStage");
     context.configVersion = readString(json, "configVersion");
+    context.runtimeConfigVersion = readString(json, "runtimeConfigVersion");
+    context.runtimeConfigJson = readString(json, "runtimeConfigJson");
     context.signedInAt = readString(json, "signedInAt");
     context.lastSyncAt = readString(json, "lastSyncAt");
     context.sessionClosedReason = readString(json, "sessionClosedReason");

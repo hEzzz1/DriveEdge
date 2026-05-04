@@ -18,6 +18,12 @@
   <string name="driver_sign_in_subtitle">设备已完成企业绑定且已分配车辆后，才允许司机签到</string>
   <string name="driver_code_hint">driverCode</string>
   <string name="driver_pin_hint">PIN</string>
+  <string name="edge_available_drivers_title">可用驾驶员</string>
+  <string name="edge_available_drivers_placeholder">下拉选择可签到驾驶员</string>
+  <string name="edge_available_drivers_loading">正在加载当前车队可用驾驶员</string>
+  <string name="edge_available_drivers_hint">当前车队有 %1$d 名可签到驾驶员，选择后会自动填入 driverCode</string>
+  <string name="edge_available_drivers_empty">当前车队暂无可签到驾驶员，也可手动输入 driverCode 重试</string>
+  <string name="edge_available_drivers_failed">驾驶员列表加载失败：%1$s</string>
   <string name="edge_context_empty">上下文：初始化中</string>
   <string name="edge_context_format">企业：%1$s\n绑定状态：%2$s\n车队：%3$s\n车辆：%4$s\n司机：%5$s\n会话开始：%6$s\n配置版本：%7$s\n上次同步：%8$s\n上报状态：%9$s</string>
   <string name="edge_sync_failed">上下文同步失败：%1$s</string>
