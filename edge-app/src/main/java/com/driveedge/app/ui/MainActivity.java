@@ -64,7 +64,6 @@ import com.driveedge.app.edge.EdgeRuntimeConfig;
 import com.driveedge.app.evidence.EvidenceFrameArchiveWriter;
 import com.driveedge.app.evidence.EvidenceFrameBuffer;
 import com.driveedge.app.evidence.EvidenceMp4Writer;
-import com.driveedge.app.evidence.RollingEvidenceRecorder;
 import com.driveedge.app.event.EdgeEventReporter;
 import com.driveedge.app.fatigue.LocalDistractionAnalyzer;
 import com.driveedge.app.fatigue.LocalFaceSignalAnalyzer;
@@ -111,10 +110,6 @@ public final class MainActivity extends AppCompatActivity {
   private static final int REPLAY_JPEG_QUALITY = 92;
   private static final int DEFAULT_RECORD_WIDTH = 1280;
   private static final int DEFAULT_RECORD_HEIGHT = 720;
-  private static final int EVIDENCE_VIDEO_WIDTH = 1280;
-  private static final int EVIDENCE_VIDEO_HEIGHT = 720;
-  private static final int EVIDENCE_VIDEO_FRAME_RATE = 30;
-  private static final int EVIDENCE_VIDEO_BIT_RATE = 1_500_000;
   private static final String LOCAL_MODEL_ASSET_PATH = "models/yolov8face.onnx";
   private static final String LOCAL_FATIGUE_MODEL_ASSET_PATH = "models/face_landmarker.task";
   private static final float LOCAL_CONF_THRESHOLD = 0.25f;
@@ -300,8 +295,6 @@ public final class MainActivity extends AppCompatActivity {
   private final EvidenceFrameArchiveWriter evidenceFrameArchiveWriter = new EvidenceFrameArchiveWriter();
   @NonNull
   private final EvidenceMp4Writer evidenceMp4Writer = new EvidenceMp4Writer();
-  @NonNull
-  private final RollingEvidenceRecorder rollingEvidenceRecorder = new RollingEvidenceRecorder();
   @Nullable
   private PendingEdgeReport pendingEdgeReport;
   private long lastEvidenceArchiveCleanupMs = 0L;
@@ -913,10 +906,6 @@ public final class MainActivity extends AppCompatActivity {
   };
 
   private void createCaptureSession(boolean withRecorder, boolean startRecorderOnConfigured) {
-    createCaptureSession(withRecorder, startRecorderOnConfigured, true);
-  }
-
-  private void createCaptureSession(boolean withRecorder, boolean startRecorderOnConfigured, boolean allowRollingEvidence) {
     CameraDevice device = cameraDevice;
     Handler handler = cameraHandler;
     if (device == null || handler == null || !previewView.isAvailable()) {
@@ -926,7 +915,6 @@ public final class MainActivity extends AppCompatActivity {
     try {
       ImageReader reader = imageReader;
       if (withRecorder) {
-        stopRollingEvidenceRecorder();
         // Some devices show green recording when analysis stream is kept alive.
         if (reader != null) {
           reader.close();
@@ -949,17 +937,16 @@ public final class MainActivity extends AppCompatActivity {
       surfaceTexture.setDefaultBufferSize(previewWidth, previewHeight);
       Surface previewSurface = new Surface(surfaceTexture);
       Surface yuvSurface = reader == null ? null : reader.getSurface();
-      Surface evidenceSurface = withRecorder || !allowRollingEvidence ? null : ensureRollingEvidenceSurface();
 
       List<Surface> surfaces = new ArrayList<>();
       surfaces.add(previewSurface);
+      // Evidence video is assembled from buffered JPEG frames. Keeping the default
+      // session to preview + YUV avoids green output on Camera2 implementations
+      // that do not handle preview + analysis + encoder surfaces reliably.
       // Some devices produce green recordings when recorder + YUV analysis run together.
       // During recording, keep only preview + recorder streams.
       if (!withRecorder && yuvSurface != null) {
         surfaces.add(yuvSurface);
-      }
-      if (!withRecorder && evidenceSurface != null) {
-        surfaces.add(evidenceSurface);
       }
       if (withRecorder && recorderSurface != null) {
         surfaces.add(recorderSurface);
@@ -992,9 +979,6 @@ public final class MainActivity extends AppCompatActivity {
               if (!withRecorder && yuvSurface != null) {
                 builder.addTarget(yuvSurface);
               }
-              if (!withRecorder && evidenceSurface != null) {
-                builder.addTarget(evidenceSurface);
-              }
               if (withRecorder && recorderSurface != null) {
                 builder.addTarget(recorderSurface);
               }
@@ -1022,12 +1006,6 @@ public final class MainActivity extends AppCompatActivity {
 
           @Override
           public void onConfigureFailed(@NonNull CameraCaptureSession session) {
-            if (!withRecorder && allowRollingEvidence && evidenceSurface != null) {
-              Log.w(TAG, "Capture session with rolling evidence failed; retrying without evidence recorder");
-              stopRollingEvidenceRecorder();
-              createCaptureSession(false, false, false);
-              return;
-            }
             runOnUiThread(() -> statusView.setText(getString(R.string.status_session_failed)));
           }
         },
@@ -1059,38 +1037,6 @@ public final class MainActivity extends AppCompatActivity {
       if (awbLockAvailable) {
         builder.set(CaptureRequest.CONTROL_AWB_LOCK, false);
       }
-    }
-  }
-
-  @Nullable
-  private Surface ensureRollingEvidenceSurface() {
-    EdgeRuntimeConfig config = edgeRuntimeConfig;
-    if (!config.evidenceEnabled() || !isVideoClipEvidence(config)) {
-      stopRollingEvidenceRecorder();
-      return null;
-    }
-    if (!rollingEvidenceRecorder.isRunning()) {
-      try {
-        rollingEvidenceRecorder.start(
-          EVIDENCE_VIDEO_WIDTH,
-          EVIDENCE_VIDEO_HEIGHT,
-          EVIDENCE_VIDEO_FRAME_RATE,
-          EVIDENCE_VIDEO_BIT_RATE,
-          evidenceBufferRetentionMs(config)
-        );
-      } catch (Exception error) {
-        Log.w(TAG, "Failed to start rolling evidence recorder", error);
-        return null;
-      }
-    }
-    return rollingEvidenceRecorder.surface();
-  }
-
-  private void stopRollingEvidenceRecorder() {
-    try {
-      rollingEvidenceRecorder.stop();
-    } catch (Exception error) {
-      Log.w(TAG, "Failed to stop rolling evidence recorder", error);
     }
   }
 
@@ -1806,11 +1752,6 @@ public final class MainActivity extends AppCompatActivity {
     long windowStartMs,
     long windowEndMs
   ) {
-    EdgeEventReporter.EventEvidence rollingEvidence = buildRollingVideoClipEvidence(config, eventCapturedAtMs, windowStartMs, windowEndMs);
-    if (rollingEvidence != null) {
-      return rollingEvidence;
-    }
-
     try {
       cleanupOldEvidenceArchivesIfNeeded();
       List<EvidenceFrameBuffer.EvidenceFrame> frames =
@@ -1837,42 +1778,6 @@ public final class MainActivity extends AppCompatActivity {
       );
     } catch (Exception error) {
       Log.w(TAG, "Failed to build evidence video clip", error);
-      return null;
-    }
-  }
-
-  @Nullable
-  private EdgeEventReporter.EventEvidence buildRollingVideoClipEvidence(
-    @NonNull EdgeRuntimeConfig config,
-    long eventCapturedAtMs,
-    long windowStartMs,
-    long windowEndMs
-  ) {
-    if (!rollingEvidenceRecorder.isRunning()) {
-      return null;
-    }
-    try {
-      cleanupOldEvidenceArchivesIfNeeded();
-      File clip = rollingEvidenceRecorder.exportClip(
-        evidenceArchiveDir(),
-        "alert_rolling_video",
-        eventCapturedAtMs,
-        windowStartMs,
-        windowEndMs,
-        computeVideoOrientationHint(),
-        config.evidenceMaxBytes()
-      );
-      if (clip == null || !clip.isFile() || clip.length() <= 0L || clip.length() > config.evidenceMaxBytes()) {
-        return null;
-      }
-      return new EdgeEventReporter.EventEvidence(
-        EVIDENCE_TYPE_VIDEO_CLIP,
-        clip.toURI().toString(),
-        EVIDENCE_MIME_VIDEO_MP4,
-        eventCapturedAtMs
-      );
-    } catch (Exception error) {
-      Log.w(TAG, "Failed to export rolling evidence video clip", error);
       return null;
     }
   }
@@ -2780,7 +2685,6 @@ public final class MainActivity extends AppCompatActivity {
     evidenceFrameBuffer.clear();
     pendingEdgeReport = null;
 
-    stopRollingEvidenceRecorder();
     releaseMediaRecorder();
     isRecording = false;
   }
