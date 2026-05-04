@@ -40,10 +40,10 @@ public final class EdgeRuntimeConfig {
   private static final long DEFAULT_DEBOUNCE_WINDOW_MS = 8_000L;
   private static final int DEFAULT_EVIDENCE_JPEG_QUALITY = 68;
   private static final int DEFAULT_EVIDENCE_MAX_BYTES = 8 * 1024 * 1024;
-  private static final long DEFAULT_EVIDENCE_SEQUENCE_WINDOW_MS = 8_000L;
-  private static final long DEFAULT_EVIDENCE_POST_WINDOW_MS = 3_000L;
-  private static final long DEFAULT_EVIDENCE_SEQUENCE_SAMPLE_INTERVAL_MS = 500L;
-  private static final int DEFAULT_EVIDENCE_SEQUENCE_MAX_FRAMES = 24;
+  private static final long DEFAULT_EVIDENCE_SEQUENCE_WINDOW_MS = 4_000L;
+  private static final long DEFAULT_EVIDENCE_POST_WINDOW_MS = 1_000L;
+  private static final long DEFAULT_EVIDENCE_SEQUENCE_SAMPLE_INTERVAL_MS = 33L;
+  private static final int DEFAULT_EVIDENCE_SEQUENCE_MAX_FRAMES = 150;
 
   @Nullable
   private final String configVersion;
@@ -312,11 +312,11 @@ public final class EdgeRuntimeConfig {
   }
 
   public long evidenceSequenceSampleIntervalMs() {
-    return Math.max(200L, Math.min(2_000L, evidenceSequenceSampleIntervalMs));
+    return Math.max(33L, Math.min(2_000L, evidenceSequenceSampleIntervalMs));
   }
 
   public int evidenceSequenceMaxFrames() {
-    return Math.max(1, Math.min(60, evidenceSequenceMaxFrames));
+    return Math.max(1, Math.min(180, evidenceSequenceMaxFrames));
   }
 
   @Nullable

@@ -44,7 +44,7 @@ public final class EvidenceMp4Writer {
 
     File safeOutputDir = ensureDirectory(outputDir);
     List<EvidenceFrameBuffer.EvidenceFrame> workingFrames = new ArrayList<>(frames);
-    int frameRate = Math.max(1, Math.min(15, requestedFrameRate));
+    int frameRate = Math.max(1, Math.min(30, requestedFrameRate));
     File outputFile;
     while (!workingFrames.isEmpty()) {
       outputFile = new File(safeOutputDir, buildClipName(clipPrefix, eventCapturedAtMs));

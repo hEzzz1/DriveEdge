@@ -13,9 +13,10 @@ public final class EdgeRuntimeConfigTest {
     assertEquals("VIDEO_CLIP", config.evidenceType());
     assertEquals("video/mp4", config.evidenceMimeType());
     assertEquals(8 * 1024 * 1024, config.evidenceMaxBytes());
-    assertEquals(8_000L, config.evidenceSequenceWindowMs());
-    assertEquals(3_000L, config.evidencePostWindowMs());
-    assertEquals(24, config.evidenceSequenceMaxFrames());
+    assertEquals(4_000L, config.evidenceSequenceWindowMs());
+    assertEquals(1_000L, config.evidencePostWindowMs());
+    assertEquals(33L, config.evidenceSequenceSampleIntervalMs());
+    assertEquals(150, config.evidenceSequenceMaxFrames());
   }
 
   @Test
